@@ -21,7 +21,8 @@ const state = {
   isLoading: false,
   lastResult: null,
   // Source management state
-  allSources: { documents: [], legacy: [], bitbucket: [], jira: [] },
+  allSources: { documents: [], legacy: [], bitbucket: [], jira: [], confluence: [] },
+  pickers: {},          // 'bb' / 'conf' -> { items, selected: Set } for the browse lists
   sourcePollTimer: null,
   progress: {},         // source id -> live indexing progress from /sources/progress
   chatMessages: [],     // this chat's messages with sources, saved to /chats after each answer
@@ -804,13 +805,15 @@ function switchSourceTab(tab) {
 
 async function loadAllSources() {
   try {
-    const [docsRes, legacyRes, bbRes, jiraRes, progressRes] = await Promise.all([
+    const [docsRes, legacyRes, bbRes, jiraRes, confRes, progressRes] = await Promise.all([
       fetch(`${API_BASE}/sources/documents`),
       fetch(`${API_BASE}/sources/documents/legacy`),
       fetch(`${API_BASE}/sources/bitbucket`),
       fetch(`${API_BASE}/sources/jira`),
+      fetch(`${API_BASE}/sources/confluence`),
       fetch(`${API_BASE}/sources/progress`),
     ]);
+    state.allSources.confluence = confRes.ok ? await confRes.json() : [];
     state.progress = progressRes.ok ? await progressRes.json() : {};
 
     state.allSources.documents = docsRes.ok ? await docsRes.json() : [];
@@ -822,6 +825,7 @@ async function loadAllSources() {
     renderLegacyDocuments();
     renderBitbucketList();
     renderJiraList();
+    renderConfluenceList();
     renderChatSourceSelection();
     trackIndexingProgress();
 
@@ -927,6 +931,7 @@ function trackIndexingProgress() {
     ...state.allSources.documents.map(s => ({ ...s, label: s.filename })),
     ...state.allSources.bitbucket.map(s => ({ ...s, label: `${s.workspace}/${s.repository}` })),
     ...state.allSources.jira.map(s => ({ ...s, label: s.project_key })),
+    ...state.allSources.confluence.map(s => ({ ...s, label: `Confluence ${s.space_key}` })),
   ];
   for (const src of all) {
     const previous = state.sourceStatuses[src.id];
@@ -991,7 +996,8 @@ function sourceJobButtons(type, src) {
       ${busy ? '<span class="spinner"></span> Indexing...' : (indexed ? '&#128260; Reindex' : '&#128269; Index')}
     </button>
     ${indexed && !busy ? `<button class="btn-action" data-job="${type}" data-id="${src.id}" data-action="sync"
-      title="${type === 'bitbucket' ? 'Re-index only if the branch has new commits' : 'Re-fetch all issues'}">&#8635; Sync</button>` : ''}`;
+      title="${{ bitbucket: 'Re-index only if the branch has new commits', jira: 'Re-fetch all issues',
+        confluence: 'Re-fetch all pages; unchanged pages are reused' }[type]}">&#8635; Sync</button>` : ''}`;
 }
 
 function bindSourceCardActions(container, type, items, labelOf) {
@@ -1201,6 +1207,7 @@ function chatSelectableSources() {
     ...state.allSources.legacy.map(l => ({ id: l.source_file, label: `${l.source_file} (older upload)`, type: 'legacy', icon: '&#128196;' })),
     ...state.allSources.bitbucket.map(b => ({ id: b.id, label: `${b.workspace}/${b.repository}${statusNote(b)}`, type: 'bitbucket', icon: '&#128230;' })),
     ...state.allSources.jira.map(j => ({ id: j.id, label: `${j.project_key}${statusNote(j)}`, type: 'jira', icon: '&#128203;' })),
+    ...state.allSources.confluence.map(c => ({ id: c.id, label: `Confluence ${c.space_key}${statusNote(c)}`, type: 'confluence', icon: '&#128216;' })),
   ];
 }
 
@@ -1247,7 +1254,8 @@ function renderInvestigateSourceList() {
     </label>`).join('');
 }
 
-const SOURCE_TYPE_TOGGLES = { document: 'searchDocs', legacy: 'searchDocs', bitbucket: 'searchBitbucket', jira: 'searchJira' };
+const SOURCE_TYPE_TOGGLES = { document: 'searchDocs', legacy: 'searchDocs', bitbucket: 'searchBitbucket',
+  jira: 'searchJira', confluence: 'searchConfluence' };
 
 // Returns null to search everything (all boxes ticked), else { source_ids, legacy_files }.
 // A source is searched only if both its own box and its type box ("Documents", ...) are ticked.
@@ -1274,6 +1282,7 @@ function showAddBitbucketModal() {
   });
   document.getElementById('bbBranch').value = 'main';
   document.getElementById('bbTestResult').style.display = 'none';
+  hidePicker('bb');
   document.getElementById('bbAddBtn').disabled = true;
   state.bbConnectionTested = false;
   updateBitbucketForm();
@@ -1370,6 +1379,8 @@ async function testBitbucketConnection() {
 
 async function addBitbucketSource() {
   const v = bitbucketFormValues();
+  const picker = state.pickers.bb;
+  if (picker && picker.selected.size) return addSelectedBitbucketRepos(v, picker);
   const error = bitbucketFormError(v);
   if (error) {
     showToast(error, 'error');
@@ -1400,6 +1411,25 @@ async function addBitbucketSource() {
   }
 }
 
+async function addSelectedBitbucketRepos(v, picker) {
+  const chosen = picker.items.filter(i => picker.selected.has(i.key));
+  try {
+    const res = await fetch(`${API_BASE}/sources/bitbucket/bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_url: v.server_url, username: v.username, token: v.token, branch: v.branch,
+                             repositories: chosen.map(i => ({ workspace: i.workspace, slug: i.slug })) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed to add repositories');
+    closeModal('modalBitbucket');
+    document.getElementById('bbToken').value = '';
+    showToast(`${data.added} repositories added - indexing queued${data.skipped.length ? ` (${data.skipped.length} already added)` : ''}`, 'success');
+    await loadAllSources();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, 'error');
+  }
+}
+
 // ============================================================
 // MODALS - Jira
 // ============================================================
@@ -1420,10 +1450,12 @@ async function testJiraConnection() {
   const token = document.getElementById('jiraToken').value;
   const resultEl = document.getElementById('jiraTestResult');
 
-  if (!baseUrl || !email || !token) {
-    showTestResult(resultEl, false, 'Please fill in URL, email, and token');
+  const cloud = /atlassian\.net/i.test(baseUrl);
+  if (!baseUrl || !token || (cloud && !email)) {
+    showTestResult(resultEl, false, cloud ? 'Please fill in URL, email, and API token' : 'Please fill in URL and token');
     return;
   }
+  const projectKey = document.getElementById('jiraProjectKey').value.trim().toUpperCase();
 
   resultEl.style.display = 'block';
   resultEl.innerHTML = '<span class="spinner"></span> Testing connection...';
@@ -1432,7 +1464,7 @@ async function testJiraConnection() {
     const res = await fetch(`${API_BASE}/sources/jira/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base_url: baseUrl, email, token }),
+      body: JSON.stringify({ base_url: baseUrl, email, token, project_key: projectKey || null }),
     });
     const data = await res.json();
 
@@ -1457,7 +1489,7 @@ async function addJiraSource() {
   const email = document.getElementById('jiraEmail').value.trim();
   const token = document.getElementById('jiraToken').value;
 
-  if (!baseUrl || !projectKey || !email || !token) {
+  if (!baseUrl || !projectKey || !token || (/atlassian\.net/i.test(baseUrl) && !email)) {
     showToast('Please fill in all required fields', 'error');
     return;
   }
@@ -1485,6 +1517,242 @@ async function addJiraSource() {
 }
 
 // ============================================================
+// CONFLUENCE - render list
+// ============================================================
+
+function renderConfluenceList() {
+  const container = document.getElementById('confluenceList');
+  const spaces = state.allSources.confluence;
+  if (!spaces.length) {
+    container.innerHTML = `
+      <div class="sources-empty">
+        <span class="sources-empty-icon">&#128216;</span>
+        <p>No Confluence spaces added yet.<br/>Click "Add Confluence Space" to index every page of a space.</p>
+      </div>`;
+    return;
+  }
+  container.innerHTML = spaces.map(space => `
+      <div class="source-card" id="conf-card-${space.id}">
+        <div class="source-card-icon">&#128216;</div>
+        <div class="source-card-info">
+          <div class="source-card-name">${escapeHtml(space.name)}</div>
+          <div class="source-card-meta">
+            <span class="source-badge status-badge-${space.status}">${space.status}</span>
+            <span>${escapeHtml(space.space_key)}</span>
+            <span>${escapeHtml(new URL(space.base_url).host)}</span>
+            ${space.page_count ? `<span>${space.page_count} pages</span>` : ''}
+            ${space.chunk_count ? `<span>${space.chunk_count} chunks</span>` : ''}
+            <span class="cred-badge">&#128274; Token configured</span>
+          </div>
+          ${space.last_sync ? `<div class="source-card-commit">Last sync: ${new Date(space.last_sync).toLocaleString()}</div>` : ''}
+          ${space.error_message ? `<p class="status-err">${escapeHtml(space.error_message)}</p>` : ''}
+          ${indexProgressHtml(space)}
+        </div>
+        <div class="source-card-actions">
+          ${sourceJobButtons('confluence', space)}
+          <button class="btn-action btn-danger-sm" title="Delete" data-delete-source="${space.id}">&#128465;</button>
+        </div>
+      </div>`).join('');
+  bindSourceCardActions(container, 'confluence', spaces, s => `Confluence ${s.space_key}`);
+}
+
+// ============================================================
+// BROWSE LISTS (pick several repositories / spaces at once)
+// ============================================================
+
+function showPicker(name, items, emptyText) {
+  state.pickers[name] = { items, selected: new Set() };
+  const box = document.getElementById(`${name}Picker`);
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="picker-head">
+      <input type="text" class="form-input picker-filter" placeholder="Filter..." />
+      <label class="picker-all"><input type="checkbox" class="picker-select-all" /> Select all</label>
+    </div>
+    <div class="picker-list"></div>
+    <div class="picker-count"></div>`;
+  box.querySelector('.picker-filter').addEventListener('input', () => renderPicker(name));
+  box.querySelector('.picker-select-all').addEventListener('change', event => {
+    visiblePickerItems(name).filter(i => !i.already_added)
+      .forEach(i => event.target.checked ? state.pickers[name].selected.add(i.key) : state.pickers[name].selected.delete(i.key));
+    renderPicker(name);
+  });
+  box.dataset.empty = emptyText;
+  renderPicker(name);
+}
+
+function visiblePickerItems(name) {
+  const filter = document.querySelector(`#${name}Picker .picker-filter`).value.trim().toLowerCase();
+  return state.pickers[name].items.filter(i => !filter || `${i.key} ${i.label}`.toLowerCase().includes(filter));
+}
+
+function renderPicker(name) {
+  const box = document.getElementById(`${name}Picker`);
+  const picker = state.pickers[name];
+  const items = visiblePickerItems(name);
+  box.querySelector('.picker-list').innerHTML = items.length ? items.map(i => `
+      <label class="picker-item ${i.already_added ? 'picker-done' : ''}">
+        <input type="checkbox" value="${escapeHtml(i.key)}" ${picker.selected.has(i.key) ? 'checked' : ''}
+          ${i.already_added ? 'disabled' : ''} />
+        <span><b>${escapeHtml(i.key)}</b>${i.label && i.label !== i.key ? ' &middot; ' + escapeHtml(i.label) : ''}
+          ${i.already_added ? '<em>(already added)</em>' : ''}</span>
+      </label>`).join('') : `<p class="source-hint">${escapeHtml(box.dataset.empty)}</p>`;
+  box.querySelectorAll('.picker-item input').forEach(cb => cb.addEventListener('change', () => {
+    cb.checked ? picker.selected.add(cb.value) : picker.selected.delete(cb.value);
+    updatePickerCount(name);
+  }));
+  updatePickerCount(name);
+}
+
+function updatePickerCount(name) {
+  const picker = state.pickers[name];
+  const box = document.getElementById(`${name}Picker`);
+  box.querySelector('.picker-count').textContent =
+    `${picker.selected.size} selected of ${picker.items.length}` +
+    (picker.selected.size ? ' - click Add to index them (a few at a time)' : '');
+  const addBtn = document.getElementById(name === 'bb' ? 'bbAddBtn' : 'confAddBtn');
+  if (picker.selected.size) addBtn.disabled = false;
+  addBtn.textContent = picker.selected.size ? `+ Add ${picker.selected.size} selected`
+    : (name === 'bb' ? '+ Add Repository' : '+ Add Space');
+}
+
+function hidePicker(name) {
+  delete state.pickers[name];
+  const box = document.getElementById(`${name}Picker`);
+  box.style.display = 'none';
+  box.innerHTML = '';
+}
+
+async function browseBitbucketRepos() {
+  const v = bitbucketFormValues();
+  const resultEl = document.getElementById('bbTestResult');
+  if (v.server_url !== null && !/^https:\/\//i.test(v.server_url)) return showTestResult(resultEl, false, 'Enter the server URL starting with https://');
+  if (v.server_url === null && (!v.workspace || !v.username)) return showTestResult(resultEl, false, 'Enter the workspace and account email');
+  if (!v.token) return showTestResult(resultEl, false, 'Enter the token');
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = '<span class="spinner"></span> Loading repositories...';
+  try {
+    const res = await fetch(`${API_BASE}/sources/bitbucket/discover`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_url: v.server_url, workspace: v.workspace, username: v.username, token: v.token }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not list repositories');
+    showTestResult(resultEl, true, `${data.repositories.length} repositories found${v.workspace ? ' in ' + v.workspace : ''}. Select the ones to add.`);
+    showPicker('bb', data.repositories.map(r => ({ key: `${r.workspace}/${r.slug}`, label: r.name, already_added: r.already_added,
+      workspace: r.workspace, slug: r.slug })), 'No repositories match.');
+  } catch (err) {
+    showTestResult(resultEl, false, err.message);
+  }
+}
+
+// ============================================================
+// MODALS - Confluence
+// ============================================================
+
+function showAddConfluenceModal() {
+  ['confSpaceKey', 'confUsername', 'confToken'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('confTestResult').style.display = 'none';
+  document.getElementById('confAddBtn').disabled = true;
+  hidePicker('conf');
+  updateConfAddLabel();
+  document.getElementById('modalConfluence').style.display = 'flex';
+}
+
+function updateConfAddLabel() {
+  document.getElementById('confAddBtn').textContent = '+ Add Space';
+}
+
+// Fill the space key from a pasted /display/KEY/... or /spaces/KEY/... link.
+function fillConfluenceSpace() {
+  const url = document.getElementById('confBaseUrl').value.trim();
+  const match = url.match(/\/(?:display|spaces)\/([^/?#]+)/) || url.match(/[?&]spaceKey=([^&#]+)/);
+  if (match) document.getElementById('confSpaceKey').value = decodeURIComponent(match[1]);
+}
+
+function confluenceFormValues() {
+  return {
+    base_url: document.getElementById('confBaseUrl').value.trim(),
+    space_key: document.getElementById('confSpaceKey').value.trim(),
+    username: document.getElementById('confUsername').value.trim(),
+    token: document.getElementById('confToken').value,
+  };
+}
+
+function confluenceFormError(v) {
+  if (!/^https:\/\//i.test(v.base_url)) return 'Enter the Confluence URL starting with https://';
+  if (/atlassian\.net/i.test(v.base_url) && !v.username) return 'Enter your account email (Confluence Cloud)';
+  if (!v.token) return 'Enter the token';
+  return null;
+}
+
+async function testConfluenceConnection() {
+  const v = confluenceFormValues();
+  const resultEl = document.getElementById('confTestResult');
+  const error = confluenceFormError(v);
+  if (error) return showTestResult(resultEl, false, error);
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = '<span class="spinner"></span> Testing connection...';
+  try {
+    const res = await fetch(`${API_BASE}/sources/confluence/test`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v),
+    });
+    const data = await res.json();
+    showTestResult(resultEl, !!data.success, data.message || data.detail || 'Connection failed');
+    if (data.success && v.space_key) document.getElementById('confAddBtn').disabled = false;
+  } catch (err) {
+    showTestResult(resultEl, false, `Error: ${err.message}`);
+  }
+}
+
+async function browseConfluenceSpaces() {
+  const v = confluenceFormValues();
+  const resultEl = document.getElementById('confTestResult');
+  const error = confluenceFormError(v);
+  if (error) return showTestResult(resultEl, false, error);
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = '<span class="spinner"></span> Loading spaces...';
+  try {
+    const res = await fetch(`${API_BASE}/sources/confluence/discover`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_url: v.base_url, username: v.username, token: v.token }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not list spaces');
+    showTestResult(resultEl, true, `${data.spaces.length} spaces found. Select the ones to add.`);
+    showPicker('conf', data.spaces.map(sp => ({ key: sp.key, label: sp.name, already_added: sp.already_added })),
+      'No spaces match.');
+  } catch (err) {
+    showTestResult(resultEl, false, err.message);
+  }
+}
+
+async function addConfluenceSource() {
+  const v = confluenceFormValues();
+  const error = confluenceFormError(v);
+  if (error) return showToast(error, 'error');
+  const picker = state.pickers.conf;
+  const bulk = picker && picker.selected.size;
+  if (!bulk && !v.space_key) return showToast('Enter a space key or select spaces from Browse spaces', 'error');
+  try {
+    const res = await fetch(`${API_BASE}/sources/confluence${bulk ? '/bulk' : ''}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bulk ? { base_url: v.base_url, username: v.username, token: v.token,
+                                    space_keys: [...picker.selected] } : v),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed to add space');
+    closeModal('modalConfluence');
+    document.getElementById('confToken').value = '';
+    showToast(bulk ? `${data.added} spaces added - indexing queued${data.skipped.length ? ` (${data.skipped.length} already added)` : ''}`
+                   : `Space ${data.space_key} added - indexing started`, 'success');
+    await loadAllSources();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, 'error');
+  }
+}
+
+// ============================================================
 // DELETE SOURCE
 // ============================================================
 
@@ -1504,6 +1772,7 @@ async function executeDelete() {
     legacy: `${API_BASE}/sources/documents/legacy?source_file=${encodeURIComponent(id)}`,
     bitbucket: `${API_BASE}/sources/bitbucket/${id}`,
     jira: `${API_BASE}/sources/jira/${id}`,
+    confluence: `${API_BASE}/sources/confluence/${id}`,
   };
 
   closeModal('modalConfirmDelete');

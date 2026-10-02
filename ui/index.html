@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=chats-20261002" />
+  <link rel="stylesheet" href="/static/style.css?v=confluence-20261002" />
 </head>
 <body>
 
@@ -81,6 +81,10 @@
             <label class="source-toggle">
               <input type="checkbox" id="searchJira" checked />
               <span>&#128203; Jira</span>
+            </label>
+            <label class="source-toggle">
+              <input type="checkbox" id="searchConfluence" checked />
+              <span>&#128216; Confluence</span>
             </label>
           </div>
           <div id="sourceSelectionList" class="source-selection-list">
@@ -220,6 +224,9 @@
           <button class="source-tab" id="stab-jira" onclick="switchSourceTab('jira')">
             &#128203; Jira
           </button>
+          <button class="source-tab" id="stab-confluence" onclick="switchSourceTab('confluence')">
+            &#128216; Confluence
+          </button>
         </div>
 
         <!-- ---- Documents sub-panel ---- -->
@@ -291,6 +298,23 @@
             <div class="sources-empty">
               <span class="sources-empty-icon">&#128203;</span>
               <p>No Jira projects added yet.<br/>Click "Add Jira Project" to connect a Jira project.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- Confluence sub-panel ---- -->
+        <div class="source-panel" id="spanel-confluence">
+          <div class="source-panel-header">
+            <h3>Confluence Spaces</h3>
+            <button class="btn-primary" onclick="showAddConfluenceModal()">
+              &#43; Add Confluence Space
+            </button>
+          </div>
+
+          <div id="confluenceList" class="sources-list">
+            <div class="sources-empty">
+              <span class="sources-empty-icon">&#128216;</span>
+              <p>No Confluence spaces added yet.<br/>Click "Add Confluence Space" to index every page of a space.</p>
             </div>
           </div>
         </div>
@@ -395,10 +419,14 @@
         <small class="field-hint" id="bbTokenHint"></small>
         <small class="field-hint">Token is encrypted before storage. It will not be displayed again.</small>
       </div>
+      <small class="field-hint">To add several (or all) repositories: leave Repository empty and click
+        <b>Browse repositories</b>. On a company server, leave the project key empty to list every repository you can access.</small>
       <div id="bbTestResult" class="connection-result" style="display:none"></div>
+      <div id="bbPicker" class="picker" style="display:none"></div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="testBitbucketConnection()">&#128172; Test Connection</button>
+      <button class="btn-secondary" onclick="browseBitbucketRepos()">&#128269; Browse repositories</button>
       <button class="btn-primary" onclick="addBitbucketSource()" id="bbAddBtn" disabled>&#43; Add Repository</button>
     </div>
   </div>
@@ -414,19 +442,21 @@
     <div class="modal-body">
       <div class="form-group">
         <label class="field-label">Jira URL</label>
-        <input type="text" id="jiraBaseUrl" class="form-input" placeholder="https://company.atlassian.net" autocomplete="url" />
+        <input type="text" id="jiraBaseUrl" class="form-input" placeholder="https://jira.company.com or https://company.atlassian.net" autocomplete="url" />
       </div>
       <div class="form-group">
         <label class="field-label">Project Key</label>
         <input type="text" id="jiraProjectKey" class="form-input" placeholder="BT" />
       </div>
       <div class="form-group">
-        <label class="field-label">Email / Username</label>
+        <label class="field-label">Email (Jira Cloud) / login ID (optional on company Jira)</label>
         <input type="text" id="jiraEmail" class="form-input" placeholder="username@company.com" autocomplete="username" />
       </div>
       <div class="form-group">
-        <label class="field-label">API Token</label>
+        <label class="field-label">Personal Access Token / API token</label>
         <input type="password" id="jiraToken" class="form-input" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password" />
+        <small class="field-hint">Company Jira (e.g. jira.company.com): your avatar &gt; Profile &gt; Personal Access Tokens &gt; Create token,
+          and leave the email empty. Jira Cloud: email + API token from id.atlassian.com &gt; Security.</small>
         <small class="field-hint">Token is encrypted before storage. It will not be displayed again.</small>
       </div>
       <div id="jiraTestResult" class="connection-result" style="display:none"></div>
@@ -434,6 +464,45 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick="testJiraConnection()">&#128172; Test Connection</button>
       <button class="btn-primary" onclick="addJiraSource()" id="jiraAddBtn" disabled>&#43; Add Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Confluence Space Modal -->
+<div class="modal-overlay" id="modalConfluence" style="display:none" onclick="closeModal('modalConfluence')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128216; Add Confluence Space</h3>
+      <button class="modal-close" onclick="closeModal('modalConfluence')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="field-label">Confluence URL or space / page link</label>
+        <input type="text" id="confBaseUrl" class="form-input" oninput="fillConfluenceSpace()"
+               placeholder="https://confluence.company.com/display/SPACE/Home" autocomplete="url" />
+        <small class="field-hint">Every current page in the space is indexed, not just one page.</small>
+      </div>
+      <div class="form-group">
+        <label class="field-label">Space key</label>
+        <input type="text" id="confSpaceKey" class="form-input" placeholder="SPACE (leave empty to browse all spaces)" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Email (Confluence Cloud) / login ID (optional on company Confluence)</label>
+        <input type="text" id="confUsername" class="form-input" placeholder="optional" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Personal Access Token / API token</label>
+        <input type="password" id="confToken" class="form-input" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password" />
+        <small class="field-hint">Company Confluence: your avatar &gt; Settings / Profile &gt; Personal Access Tokens &gt; Create token.
+          Confluence Cloud: email + API token from id.atlassian.com &gt; Security. Encrypted before storage.</small>
+      </div>
+      <div id="confTestResult" class="connection-result" style="display:none"></div>
+      <div id="confPicker" class="picker" style="display:none"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="testConfluenceConnection()">&#128172; Test Connection</button>
+      <button class="btn-secondary" onclick="browseConfluenceSpaces()">&#128269; Browse spaces</button>
+      <button class="btn-primary" onclick="addConfluenceSource()" id="confAddBtn" disabled>&#43; Add Space</button>
     </div>
   </div>
 </div>
@@ -456,6 +525,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=chats-20261002"></script>
+<script src="/static/app.js?v=confluence-20261002"></script>
 </body>
 </html>

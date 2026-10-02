@@ -97,27 +97,29 @@ def issue_to_text(issue: dict, base_url: str) -> str:
 
 
 class JiraClient:
+    """Jira Cloud (email + API token) or Jira Server / Data Center (Personal Access Token)."""
+
     def __init__(self, base_url: str, email: str, token: str, session=None):
+        from src.sources.atlassian import AtlassianSession
         self.base_url = base_url.rstrip("/")
-        self.auth = (email, token)
-        self.http = session or requests.Session()
+        self.api = AtlassianSession(self.base_url, email, token, "Jira", session)
 
     def _get(self, path, params):
-        from src import network_policy
-        try:
-            network_policy.check_url(self.base_url, "a Jira request")
-        except network_policy.ExternalNetworkBlocked as exc:
-            raise IndexingError(str(exc)) from exc
-        try:
-            response = self.http.get(f"{self.base_url}{path}", params=params, auth=self.auth,
-                                     headers={"Accept": "application/json"}, timeout=60)
-        except requests.RequestException as exc:
-            raise IndexingError(f"Could not reach Jira at {self.base_url}: {exc.__class__.__name__}") from exc
-        if response.status_code == 401:
-            raise IndexingError("Jira rejected the saved credentials. Delete and re-add the project with a valid API token.")
-        if response.status_code == 403:
-            raise IndexingError("The Jira account lacks permission to browse this project.")
-        return response
+        return self.api.get(path, params)
+
+    def test_connection(self, project_key: str = None) -> dict:
+        """Who the token belongs to and how many projects it can see; checks the project if given."""
+        me = self._get("/rest/api/2/myself", None)
+        if me.status_code != 200:
+            raise IndexingError(f"Jira returned HTTP {me.status_code} for the connection test.")
+        projects = self._get("/rest/api/2/project", None)
+        count = len(projects.json()) if projects.status_code == 200 else None
+        if project_key:
+            project = self._get(f"/rest/api/2/project/{project_key}", None)
+            if project.status_code == 404:
+                raise IndexingError(f"Project '{project_key}' was not found or is not visible to this account.")
+        data = me.json()
+        return {"display_name": data.get("displayName") or data.get("name"), "projects_found": count}
 
     def search_issues(self, project_key: str, on_page=None):
         jql = f'project = "{project_key}" ORDER BY updated DESC'

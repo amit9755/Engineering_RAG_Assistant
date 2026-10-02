@@ -169,12 +169,13 @@ def history_rewriter_node(state: RAGState) -> Dict[str, Any]:
         return {"rewritten_query": query, "pipeline_steps": steps}
 
 
-SOURCE_TYPE_LABELS = {"document": "document", "bitbucket": "code", "jira": "Jira issue"}
+SOURCE_TYPE_LABELS = {"document": "document", "bitbucket": "code", "jira": "Jira issue",
+                      "confluence": "Confluence page"}
 
 # Shared by the graph's generation node and the streaming endpoint.
 SYSTEM_PROMPT = """You are a precise engineering assistant. Answer using ONLY the numbered
 sources below. They come from the user's uploaded documents, Bitbucket repository
-files, and Jira issues.
+files, Jira issues, and Confluence pages.
 
 How to answer:
 - If the user asks several questions, answer each one under its own short heading.
@@ -199,7 +200,8 @@ def knowledge_catalog(source_filter=None) -> List[str]:
     try:
         from src.sources.registry import source_registry
         from src.retrieval.vector_store import vector_store
-        kinds = {"document": "Document", "bitbucket": "Bitbucket repository", "jira": "Jira project"}
+        kinds = {"document": "Document", "bitbucket": "Bitbucket repository", "jira": "Jira project",
+                 "confluence": "Confluence space"}
         lines = []
         for src in source_registry.list_sources():
             if not src.chunk_count:
@@ -338,6 +340,8 @@ def default_suggestions(catalog: List[str]) -> List[str]:
                         "Which files handle configuration?"]
     if "Jira project" in text:
         suggestions.append("What are the most recent Jira issues?")
+    if "Confluence space" in text:
+        suggestions.append("Summarize the main Confluence pages")
     if "Document:" in text or "Older upload:" in text:
         suggestions.append("Summarize the uploaded documents")
     return suggestions[:3]

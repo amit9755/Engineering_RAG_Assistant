@@ -35,6 +35,8 @@ from src.sources.models import (
     SourceResponse,
     SourceStatus,
     SourceType,
+    ConfluenceSourceConfig,
+    ConfluenceSourceResponse,
 )
 from src.observability.logger import get_logger
 
@@ -100,6 +102,14 @@ class SourceRegistry:
                     credential_id   TEXT NOT NULL,
                     last_commit     TEXT,
                     file_count      INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS confluence_configs (
+                    source_id       TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+                    base_url        TEXT NOT NULL,
+                    space_key       TEXT NOT NULL,
+                    credential_id   TEXT NOT NULL,
+                    page_count      INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS jira_configs (
@@ -533,6 +543,45 @@ class SourceRegistry:
                         credential_configured=True,
                     )
                 )
+        return results
+
+    # ----------------------------------------------------------
+    # Confluence source operations
+    # ----------------------------------------------------------
+
+    def create_confluence_source(self, config: ConfluenceSourceConfig, name: str) -> Source:
+        source = Source(id=config.source_id, type=SourceType.CONFLUENCE, name=name, status=SourceStatus.PENDING)
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("INSERT INTO sources (id, type, name, status, created_at, updated_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         (source.id, source.type.value, source.name, source.status.value, now, now))
+            conn.execute("INSERT INTO confluence_configs (source_id, base_url, space_key, credential_id, page_count) "
+                         "VALUES (?, ?, ?, ?, ?)",
+                         (config.source_id, config.base_url, config.space_key, config.credential_id,
+                          config.page_count))
+        logger.info("confluence_source_created", source_id=source.id, space=config.space_key)
+        return source
+
+    def get_confluence_config(self, source_id: str) -> Optional[ConfluenceSourceConfig]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM confluence_configs WHERE source_id = ?", (source_id,)).fetchone()
+        return ConfluenceSourceConfig(**dict(row)) if row else None
+
+    def update_confluence_config(self, source_id: str, page_count: Optional[int] = None) -> None:
+        if page_count is None:
+            return
+        with self._connect() as conn:
+            conn.execute("UPDATE confluence_configs SET page_count = ? WHERE source_id = ?", (page_count, source_id))
+            conn.execute("UPDATE sources SET updated_at = ? WHERE id = ?", (self._now(), source_id))
+
+    def list_confluence_sources(self) -> List[ConfluenceSourceResponse]:
+        results = []
+        for s in self.list_sources(SourceType.CONFLUENCE):
+            cfg = self.get_confluence_config(s.id)
+            if cfg:
+                results.append(ConfluenceSourceResponse(**s.model_dump(), base_url=cfg.base_url,
+                                                        space_key=cfg.space_key, page_count=cfg.page_count))
         return results
 
     # ----------------------------------------------------------

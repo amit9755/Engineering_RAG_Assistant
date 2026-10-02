@@ -323,6 +323,9 @@ class VectorStore:
                 return None
             if meta.get("source_type") == "jira":
                 return None
+            if meta.get("source_type") == "confluence":
+                # the space's top-level pages (home page first) describe it best
+                return (meta.get("depth", 9), 0, meta.get("chunk_index", 0)) if meta.get("depth", 9) <= 1 else None
             return (0, 0, meta.get("chunk_index", 0))  # documents and older uploads: their opening
 
         groups = {}

@@ -30,6 +30,7 @@ MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
 MAX_FILE_BYTES = 400 * 1024
 MAX_FILES = 5000
 MAX_COMMITS = 200          # recent commit history indexed per branch
+MAX_LISTED_REPOS = 2000    # repository browser limit
 COMMITS_PER_CHUNK = 12
 
 TEXT_EXTENSIONS = {
@@ -107,10 +108,26 @@ class BitbucketClient:
         response = self._get(f"{API_BASE}/repositories/{workspace}")
         if response.status_code == 404:
             raise IndexingError(f"Workspace '{workspace}' not found")
-        response.raise_for_status()
+        _raise_for_status(response)
         if repository:
             self.get_repository(workspace, repository)
         return response.json().get("size", 0)
+
+    def list_repositories(self, workspace=None):
+        """Repositories in a workspace: [{workspace, slug, name}]."""
+        if not workspace:
+            raise IndexingError("Enter the workspace to list its repositories.")
+        url, params, repos = f"{API_BASE}/repositories/{workspace}", {"pagelen": 100}, []
+        while url and len(repos) < MAX_LISTED_REPOS:
+            response = self._get(url, params=params)
+            if response.status_code == 404:
+                raise IndexingError(f"Workspace '{workspace}' not found")
+            _raise_for_status(response)
+            data = response.json()
+            repos += [{"workspace": workspace, "slug": r["slug"], "name": r.get("name") or r["slug"]}
+                      for r in data.get("values", [])]
+            url, params = data.get("next"), None
+        return repos
 
     def file_url(self, workspace, repository, commit, path=None):
         base = f"{WEB_BASE}/{workspace}/{repository}"
@@ -134,14 +151,14 @@ class BitbucketClient:
         response = self._get(f"{API_BASE}/repositories/{workspace}/{repository}")
         if response.status_code == 404:
             raise IndexingError(f"Repository {workspace}/{repository} was not found or is not visible to this token.")
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def get_branch_commit(self, workspace, repository, branch):
         response = self._get(f"{API_BASE}/repositories/{workspace}/{repository}/refs/branches/{quote(branch, safe='')}")
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()["target"]["hash"]
 
     def get_commits(self, workspace, repository, commit, limit=MAX_COMMITS):
@@ -150,7 +167,7 @@ class BitbucketClient:
         commits, params = [], {"pagelen": 100}
         while url and len(commits) < limit:
             response = self._get(url, params=params)
-            response.raise_for_status()
+            _raise_for_status(response)
             data = response.json()
             for c in data.get("values", []):
                 raw_author = (c.get("author") or {}).get("raw", "")   # "Name <email>"
@@ -214,16 +231,33 @@ class BitbucketServerClient:
         response = self._get(self._api(project, suffix="/repos"), params={"limit": 100})
         if response.status_code == 404:
             raise IndexingError(f"Project '{project}' not found on {self.base} (use the project KEY, e.g. WSQAAUTO).")
-        response.raise_for_status()
+        _raise_for_status(response)
         if repository:
             self.get_repository(project, repository)
         return response.json().get("size", 0)
+
+    def list_repositories(self, project=None):
+        """Repositories in a project, or every repository the token can see: [{workspace, slug, name}]."""
+        url = self._api(project, suffix="/repos") if project else f"{self.base}/rest/api/1.0/repos"
+        repos, start = [], 0
+        while len(repos) < MAX_LISTED_REPOS:
+            response = self._get(url, params={"limit": 100, "start": start})
+            if response.status_code == 404:
+                raise IndexingError(f"Project '{project}' not found on {self.base} (use the project KEY).")
+            _raise_for_status(response)
+            data = response.json()
+            repos += [{"workspace": (r.get("project") or {}).get("key") or project, "slug": r["slug"],
+                       "name": r.get("name") or r["slug"]} for r in data.get("values", [])]
+            if data.get("isLastPage", True):
+                break
+            start = data.get("nextPageStart", start + 100)
+        return repos[:MAX_LISTED_REPOS]
 
     def get_repository(self, project, repository):
         response = self._get(self._api(project, repository))
         if response.status_code == 404:
             raise IndexingError(f"Repository {project}/{repository} was not found or is not visible to this token.")
-        response.raise_for_status()
+        _raise_for_status(response)
         repo = response.json()
         default = self._default_branch(project, repository)
         repo["mainbranch"] = {"name": default} if default else None
@@ -241,7 +275,7 @@ class BitbucketServerClient:
                              params={"filterText": branch, "limit": 100})
         if response.status_code == 404:
             raise IndexingError(f"Repository {project}/{repository} was not found or is not visible to this token.")
-        response.raise_for_status()
+        _raise_for_status(response)
         for ref in response.json().get("values", []):
             if ref.get("displayId") == branch or ref.get("id") == f"refs/heads/{branch}":
                 return ref.get("latestCommit")
@@ -254,7 +288,7 @@ class BitbucketServerClient:
         while len(commits) < limit:
             response = self._get(self._api(project, repository, "/commits"),
                                  params={"until": commit, "limit": 100, "start": start})
-            response.raise_for_status()
+            _raise_for_status(response)
             data = response.json()
             for c in data.get("values", []):
                 stamp = c.get("authorTimestamp")
@@ -283,6 +317,19 @@ class BitbucketServerClient:
     def file_url(self, project, repository, commit, path=None):
         base = f"{self.base}/projects/{project}/repos/{repository}/browse"
         return f"{base}/{path}?at={commit}" if path else base
+
+
+def _raise_for_status(response):
+    """Unexpected HTTP status as a readable IndexingError (shown in the UI) instead of a server error."""
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            data = response.json()
+            errors = data.get("errors") or [data.get("error") or {}]
+            detail = (errors[0] or {}).get("message", "") if isinstance(errors, list) else ""
+        except Exception:
+            pass
+        raise IndexingError(f"Bitbucket returned HTTP {response.status_code}{': ' + detail if detail else ''}.")
 
 
 def _check_network(url):

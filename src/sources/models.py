@@ -23,6 +23,7 @@ class SourceType(str, Enum):
     DOCUMENT = "document"
     BITBUCKET = "bitbucket"
     JIRA = "jira"
+    CONFLUENCE = "confluence"
 
 
 class SourceStatus(str, Enum):
@@ -91,6 +92,15 @@ class JiraSourceConfig(BaseModel):
     last_sync_issue_updated: Optional[datetime] = None
 
 
+class ConfluenceSourceConfig(BaseModel):
+    """A Confluence space; every current page in it is indexed."""
+    source_id: str
+    base_url: str          # e.g. https://confluence.company.com or https://x.atlassian.net/wiki
+    space_key: str
+    credential_id: str
+    page_count: int = 0
+
+
 # ============================================================
 # Credential record (encrypted token storage)
 # ============================================================
@@ -150,6 +160,13 @@ class JiraSourceResponse(SourceResponse):
     credential_configured: bool = True
 
 
+class ConfluenceSourceResponse(SourceResponse):
+    base_url: str
+    space_key: str
+    page_count: int
+    credential_configured: bool = True
+
+
 # ============================================================
 # Request models for creating/testing sources
 # ============================================================
@@ -176,15 +193,16 @@ class TestBitbucketRequest(BaseModel):
 class AddJiraSourceRequest(BaseModel):
     base_url: str = Field(description="Jira base URL, e.g. https://company.atlassian.net")
     project_key: str = Field(description="Jira project key, e.g. BT")
-    email: str = Field(description="Jira account email")
-    token: str = Field(description="Jira API token")
+    email: str = Field(default="", description="Cloud: account email. Server / Data Center: optional login ID")
+    token: str = Field(description="Cloud: API token. Server / Data Center: Personal Access Token")
     name: Optional[str] = None
 
 
 class TestJiraRequest(BaseModel):
     base_url: str
-    email: str
+    email: str = ""
     token: str
+    project_key: Optional[str] = None
 
 
 class UpdateBitbucketSourceRequest(BaseModel):
@@ -214,3 +232,22 @@ class IndexJobResponse(BaseModel):
     chunks_added: Optional[int] = None
     files_processed: Optional[int] = None
     issues_processed: Optional[int] = None
+
+
+class ConfluenceCredentials(BaseModel):
+    base_url: str = Field(description="Confluence URL, or any page / space link")
+    username: str = Field(default="", description="Cloud: account email. Server / Data Center: optional login ID")
+    token: str = Field(description="Cloud: API token. Server / Data Center: Personal Access Token")
+
+
+class TestConfluenceRequest(ConfluenceCredentials):
+    space_key: Optional[str] = None
+
+
+class AddConfluenceSourceRequest(ConfluenceCredentials):
+    space_key: str = Field(default="", description="Space key; may come from a pasted space link")
+    name: Optional[str] = None
+
+
+class BulkAddConfluenceRequest(ConfluenceCredentials):
+    space_keys: list

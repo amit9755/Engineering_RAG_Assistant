@@ -64,58 +64,22 @@ async def test_jira_connection(request: TestJiraRequest):
     Phase 1: Basic HTTP test against Jira REST API.
     Phase 6: Returns full project list for dynamic dropdown.
     """
-    from src import network_policy
+    from starlette.concurrency import run_in_threadpool
+    from src.sources.jira_indexer import JiraClient
+    from src.sources.jobs import IndexingError
+
+    if not request.base_url.strip().lower().startswith("https://"):
+        return TestConnectionResponse(success=False, message="Jira URL must start with https://")
     try:
-        network_policy.check_url(request.base_url, "the Jira connection test")
-    except network_policy.ExternalNetworkBlocked as exc:
+        client = JiraClient(request.base_url.strip(), request.email.strip(), request.token)
+        info = await run_in_threadpool(client.test_connection, (request.project_key or "").strip().upper() or None)
+        return TestConnectionResponse(success=True, message="Connection successful", base_url=request.base_url,
+                                      display_name=info["display_name"], projects_found=info["projects_found"])
+    except IndexingError as exc:
         return TestConnectionResponse(success=False, message=str(exc))
-    try:
-        import requests as http_requests
-        from requests.auth import HTTPBasicAuth
-
-        auth = HTTPBasicAuth(request.email, request.token)
-        # Test with the /myself endpoint which is lightweight
-        url = f"{request.base_url.rstrip('/')}/rest/api/2/myself"
-        response = http_requests.get(url, auth=auth, timeout=10)
-
-        if response.status_code == 200:
-            data = response.json()
-            display_name = data.get("displayName", request.email)
-
-            # Also get project count
-            projects_url = f"{request.base_url.rstrip('/')}/rest/api/2/project"
-            projects_response = http_requests.get(projects_url, auth=auth, timeout=10)
-            projects_count = len(projects_response.json()) if projects_response.status_code == 200 else None
-
-            return TestConnectionResponse(
-                success=True,
-                message="Connection successful",
-                base_url=request.base_url,
-                display_name=display_name,
-                projects_found=projects_count,
-            )
-        elif response.status_code == 401:
-            return TestConnectionResponse(
-                success=False,
-                message="Authentication failed: invalid email or API token",
-            )
-        elif response.status_code == 403:
-            return TestConnectionResponse(
-                success=False,
-                message="Permission denied: check your API token scopes",
-            )
-        else:
-            return TestConnectionResponse(
-                success=False,
-                message=f"Jira returned status {response.status_code}",
-            )
-
     except Exception as exc:
         logger.warning("jira_connection_test_failed", error=str(exc))
-        return TestConnectionResponse(
-            success=False,
-            message=f"Connection error: {str(exc)}",
-        )
+        return TestConnectionResponse(success=False, message=f"Connection error: {exc.__class__.__name__}")
 
 
 # ============================================================

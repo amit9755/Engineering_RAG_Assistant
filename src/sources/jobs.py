@@ -5,6 +5,7 @@ so the API starts a job and returns immediately; the UI polls the source
 status (indexing -> ready / error). One job per source at a time.
 """
 
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -26,6 +27,8 @@ class IndexJobRunner:
         self._running = set()
         self._lock = threading.Lock()
         self._progress = {}   # source_id -> current stage of a running job
+        # Indexing is CPU heavy: run a few jobs at a time and queue the rest.
+        self._slots = threading.Semaphore(max(1, int(os.environ.get("INDEX_PARALLEL_JOBS", "2"))))
 
     def report(self, source_id: str, stage: str, done: int = None, total: int = None, unit: str = "") -> None:
         """Record what a running job is doing, for the UI and the server log."""
@@ -70,8 +73,8 @@ class IndexJobRunner:
             if source_id in self._running:
                 return False
             self._running.add(source_id)
-            self._progress[source_id] = {"stage": "Starting", "done": None, "total": None, "unit": "",
-                                         "started": time.time()}
+            self._progress[source_id] = {"stage": "Queued (waiting for other indexing jobs)", "done": None,
+                                         "total": None, "unit": "", "started": time.time()}
         self.registry.update_source_status(source_id, SourceStatus.INDEXING)
         if background:
             threading.Thread(target=self._run, args=(source_id, job),
@@ -81,7 +84,9 @@ class IndexJobRunner:
         return True
 
     def _run(self, source_id: str, job) -> None:
+        self._slots.acquire()
         try:
+            self.report(source_id, "Starting")
             chunk_count = job(source_id)
             self.registry.update_source_status(
                 source_id, SourceStatus.READY, chunk_count=chunk_count,
@@ -98,6 +103,7 @@ class IndexJobRunner:
                               "Previously indexed content was kept; retry indexing.",
             )
         finally:
+            self._slots.release()
             with self._lock:
                 self._running.discard(source_id)
                 self._progress.pop(source_id, None)

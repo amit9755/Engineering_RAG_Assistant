@@ -107,6 +107,7 @@ from src.api.routes.sources import documents as doc_sources
 from src.api.routes.sources import bitbucket as bb_sources
 from src.api.routes.sources import jira as jira_sources
 from src.api.routes.sources import progress as source_progress
+from src.api.routes.sources import confluence as confluence_sources
 
 app.include_router(query.router, prefix="/api/v1", tags=["Query"])
 app.include_router(ingest.router, prefix="/api/v1", tags=["Ingestion"])
@@ -115,6 +116,7 @@ app.include_router(doc_sources.router, prefix="/api/v1")
 app.include_router(bb_sources.router, prefix="/api/v1")
 app.include_router(jira_sources.router, prefix="/api/v1")
 app.include_router(source_progress.router, prefix="/api/v1")
+app.include_router(confluence_sources.router, prefix="/api/v1")
 app.include_router(chats.router, prefix="/api/v1")
 
 

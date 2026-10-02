@@ -1054,3 +1054,17 @@ body {
   border-radius: 16px; padding: 4px 11px; font-size: 12.5px; cursor: pointer; text-align: left;
 }
 .suggestion-chip:hover { background: var(--accent); color: #fff; }
+
+/* ===== Browse lists (pick many repositories / spaces) ===== */
+.picker { margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; }
+.picker-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.picker-filter { flex: 1; }
+.picker-all { font-size: 12.5px; white-space: nowrap; color: var(--text-secondary); display: flex; gap: 5px; align-items: center; }
+.picker-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.picker-item { display: flex; gap: 8px; align-items: flex-start; padding: 4px 6px; border-radius: 4px; font-size: 12.5px; cursor: pointer; }
+.picker-item:hover { background: var(--bg-hover); }
+.picker-item b { font-weight: 600; }
+.picker-item em { color: var(--text-muted); font-style: normal; font-size: 11.5px; }
+.picker-done { opacity: 0.6; cursor: default; }
+.picker-count { margin-top: 6px; font-size: 11.5px; color: var(--text-muted); }
+.modal { max-width: 560px; }

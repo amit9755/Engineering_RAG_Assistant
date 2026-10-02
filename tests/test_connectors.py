@@ -274,7 +274,7 @@ def test_jira_client_paginates_and_falls_back_to_server_api():
 def test_jira_auth_failure_is_a_readable_error():
     session = Mock()
     session.get.return_value = response(401)
-    with pytest.raises(IndexingError, match="rejected the saved credentials"):
+    with pytest.raises(IndexingError, match="rejected the credentials.*API token"):
         JiraClient("https://acme.atlassian.net", "e", "t", session).search_issues("BT")
 
 
@@ -610,3 +610,24 @@ def test_old_index_without_commit_history_is_reindexed_by_sync_and_explained(reg
     assert nodes.missing_commit_history("explain this project") == []
     answer = nodes.no_context_answer([], "tell last 5 commit", None, ["ws/repo"])
     assert "Commit history hasn't been indexed yet for: ws/repo" in answer and "Reindex" in answer
+
+
+
+def test_jira_server_uses_personal_access_token_as_bearer():
+    session = Mock()
+    session.get.side_effect = [response(200, {"displayName": "Amit"}), response(200, [{"key": "WSQ"}]),
+                               response(200, {"key": "WSQ"})]
+    info = JiraClient("https://jira.sw.example.com", "", "pat-123", session).test_connection("WSQ")
+    assert info == {"display_name": "Amit", "projects_found": 1}
+    first = session.get.call_args_list[0]
+    assert first.kwargs["headers"]["Authorization"] == "Bearer pat-123" and "auth" not in first.kwargs
+
+    rejected = Mock()
+    rejected.get.return_value = response(401)
+    with pytest.raises(IndexingError, match="Personal Access Token"):
+        JiraClient("https://jira.sw.example.com", "", "bad", rejected).test_connection()
+    # a username enables a Basic-auth retry for older servers
+    retry = Mock()
+    retry.get.side_effect = [response(401), response(200, {"name": "nxf1"}), response(200, [])]
+    JiraClient("https://jira.sw.example.com", "nxf1", "pw", retry).test_connection()
+    assert retry.get.call_args_list[1].kwargs["auth"] == ("nxf1", "pw")

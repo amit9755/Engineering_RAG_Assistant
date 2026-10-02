@@ -226,6 +226,19 @@ progress; previously indexed content stays searchable until it succeeds.
   (`.env`, keys). If the configured branch doesn't exist, the repository's
   default branch is used. **Sync** re-indexes only when there are new commits.
   The token needs repository read access.
+- **Add many at once:** in **Add Repository**, leave Repository empty and click
+  **Browse repositories** to list a project's repositories (or, on a company
+  server with no project key, every repository you can access); filter, tick or
+  **Select all**, then **Add N selected**. Each becomes its own source; indexing
+  is queued and runs `INDEX_PARALLEL_JOBS` (default 2) at a time.
+- **Confluence** (Cloud or Server / Data Center) indexes **every current page of
+  a space**. Paste a space or page link (the space key is filled in), or click
+  **Browse spaces** to add several spaces at once. Company servers use a
+  Personal Access Token (avatar > Profile > Personal Access Tokens); Cloud uses
+  email + API token. Pages keep their title, page-tree path and link; Sync
+  re-fetches all pages and reuses vectors of unchanged ones.
+- **Jira Server / Data Center** (e.g. `jira.company.com`) uses a Personal Access
+  Token with the email left empty; Jira Cloud uses email + API token.
 - **Jira** indexes each issue's key fields, description, and latest 30 comments
   (up to 5,000 issues) using an Atlassian API token. **Sync** re-fetches all issues.
 

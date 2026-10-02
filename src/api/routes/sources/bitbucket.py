@@ -135,6 +135,24 @@ async def list_branches(workspace: str, repository: str, username: str, token: s
 # CRUD operations
 # ============================================================
 
+def _create_source(server_url, workspace, repository, branch, username, token, name=None):
+    """Register one repository. Each source gets its own encrypted copy of the credential,
+    so deleting one repository never breaks the others."""
+    source_id = f"bb-{uuid.uuid4().hex[:8]}"
+    credential_id = credential_store.store(
+        provider="bitbucket",
+        label=f"{workspace}/{repository} token",
+        plaintext_token=f"{(username or '').strip()}:{token}",
+    )
+    config = BitbucketSourceConfig(source_id=source_id, workspace=workspace, repository=repository,
+                                   branch=branch or "main", credential_id=credential_id, server_url=server_url)
+    source = source_registry.create_bitbucket_source(config, name=name or f"{workspace}/{repository}")
+    logger.info("bitbucket_source_added", source_id=source_id, repo=f"{workspace}/{repository}")
+    return BitbucketSourceResponse(**source.model_dump(), workspace=workspace, repository=repository,
+                                   branch=config.branch, last_commit=None, file_count=0,
+                                   server_url=server_url, credential_configured=True)
+
+
 @router.post("", response_model=BitbucketSourceResponse, summary="Add a Bitbucket source")
 async def add_bitbucket_source(request: AddBitbucketSourceRequest):
     """
@@ -145,52 +163,81 @@ async def add_bitbucket_source(request: AddBitbucketSourceRequest):
 
     After adding, call POST /{source_id}/index to index the repository.
     """
-    server_url, request.workspace, request.repository = _normalize_target(
+    server_url, workspace, repository = _normalize_target(
         request.server_url, request.workspace, request.repository)
-    if not request.workspace or not request.repository or not request.token:
+    if not workspace or not repository or not request.token:
         raise HTTPException(status_code=422, detail="Workspace / project key, repository and token are required")
+    return _create_source(server_url, workspace, repository, request.branch, request.username,
+                          request.token, request.name)
 
-    # Generate a unique source ID
-    source_id = f"bb-{uuid.uuid4().hex[:8]}"
 
-    # Store the credential encrypted
-    credential_id = credential_store.store(
-        provider="bitbucket",
-        label=f"{request.workspace}/{request.repository} token",
-        plaintext_token=f"{request.username}:{request.token}",
-    )
+class DiscoverRequest(BaseModel):
+    server_url: Optional[str] = None
+    workspace: str = ""          # Cloud: workspace (required). Server: project key, or empty for all projects
+    username: str = ""
+    token: str
 
-    # Build display name
-    name = request.name or f"{request.workspace}/{request.repository}"
 
-    # Create config (no token stored here)
-    config = BitbucketSourceConfig(
-        source_id=source_id,
-        workspace=request.workspace,
-        repository=request.repository,
-        branch=request.branch,
-        credential_id=credential_id,
-        server_url=server_url,
-    )
+@router.post("/discover", summary="List repositories available to a token")
+async def discover_repositories(request: DiscoverRequest):
+    """Repositories in a workspace / project (Server: every visible repository if no project key is given)."""
+    from starlette.concurrency import run_in_threadpool
+    from src.sources.bitbucket_indexer import make_client
+    from src.sources.jobs import IndexingError
 
-    source = source_registry.create_bitbucket_source(config, name=name)
+    server_url, workspace, _ = _normalize_target(request.server_url, request.workspace, "")
+    try:
+        client = make_client(request.username.strip(), request.token, server_url=server_url)
+        repos = await run_in_threadpool(client.list_repositories, workspace or None)
+    except IndexingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    existing = {(cfg.server_url, cfg.workspace.lower(), cfg.repository.lower())
+                for cfg in (source_registry.get_bitbucket_config(s.id) for s in source_registry.list_sources())
+                if cfg}
+    for repo in repos:
+        repo["already_added"] = (server_url, repo["workspace"].lower(), repo["slug"].lower()) in existing
+    return {"repositories": repos}
 
-    logger.info(
-        "bitbucket_source_added",
-        source_id=source_id,
-        repo=f"{request.workspace}/{request.repository}",
-    )
 
-    return BitbucketSourceResponse(
-        **source.model_dump(),
-        workspace=request.workspace,
-        repository=request.repository,
-        branch=request.branch,
-        last_commit=None,
-        file_count=0,
-        server_url=server_url,
-        credential_configured=True,
-    )
+class BulkRepository(BaseModel):
+    workspace: str
+    slug: str
+
+
+class BulkAddRequest(BaseModel):
+    server_url: Optional[str] = None
+    username: str = ""
+    token: str
+    branch: str = "main"
+    repositories: List[BulkRepository]
+
+
+@router.post("/bulk", summary="Add many repositories and start indexing them")
+async def bulk_add_repositories(request: BulkAddRequest):
+    """Adds every listed repository not already added, then queues indexing (a few run at a time)."""
+    from src.sources.bitbucket_indexer import bitbucket_indexer
+
+    server_url, _, _ = _normalize_target(request.server_url, "x", "x")
+    if not request.repositories:
+        raise HTTPException(status_code=422, detail="Select at least one repository")
+    if len(request.repositories) > 500:
+        raise HTTPException(status_code=422, detail="Add at most 500 repositories at a time")
+    existing = {(cfg.server_url, cfg.workspace.lower(), cfg.repository.lower())
+                for cfg in (source_registry.get_bitbucket_config(s.id) for s in source_registry.list_sources())
+                if cfg}
+    added, skipped = [], []
+    for repo in request.repositories:
+        key = (server_url, repo.workspace.lower(), repo.slug.lower())
+        if key in existing:
+            skipped.append(f"{repo.workspace}/{repo.slug}")
+            continue
+        existing.add(key)
+        source = _create_source(server_url, repo.workspace, repo.slug, request.branch,
+                                request.username, request.token)
+        index_jobs.start(source.id, bitbucket_indexer.index)
+        added.append(source.id)
+    logger.info("bitbucket_bulk_added", added=len(added), skipped=len(skipped))
+    return {"added": len(added), "skipped": skipped, "source_ids": added}
 
 
 @router.get("", response_model=List[BitbucketSourceResponse], summary="List Bitbucket sources")
