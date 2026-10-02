@@ -1,0 +1,74 @@
+# ============================================================
+# docker-compose.yml - Local Development Stack
+#
+# Learning Note:
+#   Docker Compose lets you run all services with one command:
+#     docker-compose up
+#
+#   Services in this stack:
+#     rag-api   - The FastAPI backend (our main application)
+#     chromadb  - Vector database (runs as a separate server)
+#
+#   For production on GCP, Cloud Run replaces rag-api and
+#   Vertex AI Vector Search replaces chromadb.
+#
+#   HOW TO USE:
+#     1. cp .env.example .env   (fill in your API keys)
+#     2. docker-compose up      (starts both services)
+#     3. Open http://localhost:8000
+# ============================================================
+
+version: "3.9"
+
+services:
+
+  # ===== Main RAG API Service =====
+  rag-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: advanced-rag-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for hot-reload in development
+      - .:/app
+      # Persist ChromaDB data between container restarts
+      - chroma-data:/app/data/chroma_db
+    env_file:
+      - .env
+    environment:
+      - VECTOR_STORE_TYPE=chroma
+      - CHROMA_PERSIST_DIR=/app/data/chroma_db
+      - ENVIRONMENT=development
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # allow time for model downloads
+
+  # ===== ChromaDB Vector Store =====
+  # Learning Note:
+  #   ChromaDB can run in embedded mode (inside our app) or
+  #   as a separate HTTP server. We use the HTTP server mode
+  #   in Docker so the vector store persists independently.
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: advanced-rag-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+volumes:
+  chroma-data:
+    driver: local

@@ -1,0 +1,10 @@
+# .acccheckpointignore
+# Add file or directory patterns here to exclude them from VERO checkpoint snapshots.
+# Syntax is the same as .gitignore — one pattern per line.
+# Lines starting with '#' are comments.
+#
+# Examples:
+#   large-dataset/
+#   *.bin
+#   tmp/
+#   secrets.env

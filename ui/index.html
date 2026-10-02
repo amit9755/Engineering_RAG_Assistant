@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Engineering RAG Assistant</title>
+  <script>
+    // Apply the saved theme before the page renders, to avoid a flash.
+    try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
+  </script>
+  <link rel="stylesheet" href="/static/style.css?v=theme-20261002" />
+</head>
+<body>
+
+<div class="app-container">
+
+  <!-- ===== TOP HEADER ===== -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">&#9881;</span>
+        <span class="logo-text">Engineering RAG Assistant</span>
+        <span class="logo-badge">LangGraph + GCP</span>
+      </div>
+    </div>
+    <div class="header-center">
+      <!-- Top-level navigation tabs -->
+      <nav class="main-tabs">
+        <button class="main-tab active" id="tab-chat" onclick="switchMainTab('chat')">
+          &#128172; Chat
+        </button>
+        <button class="main-tab" id="tab-sources" onclick="switchMainTab('sources')">
+          &#128193; Knowledge Sources
+        </button>
+        <button class="main-tab" id="tab-investigate" onclick="switchMainTab('investigate')">
+          &#128269; Investigate
+        </button>
+      </nav>
+    </div>
+    <div class="header-center-status">
+      <div class="status-bar" id="statusBar">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Connecting...</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="btn-icon" id="themeToggle" onclick="toggleTheme()" title="Switch to dark mode">&#9790;</button>
+      <button class="btn-icon" onclick="toggleSettings()" title="Settings">&#9881;</button>
+      <button class="btn-icon" onclick="newChat()" title="New chat">&#43;</button>
+    </div>
+  </header>
+
+  <!-- ===== MAIN CONTENT AREA ===== -->
+  <div class="main-content">
+
+    <!-- ==================================================
+         TAB 1: CHAT
+    ================================================== -->
+    <div class="tab-panel active" id="panel-chat">
+
+      <!-- LEFT SIDEBAR: New chat + source selection (uploads live in Knowledge Sources) -->
+      <aside class="sidebar-left">
+        <div class="sidebar-section">
+          <button class="btn-new-chat" onclick="newChat()" title="Start a new conversation">
+            &#43; New chat
+          </button>
+        </div>
+
+        <!-- Search In: source selection for chat -->
+        <div class="sidebar-section" id="sourceSelectionPanel">
+          <h3 class="sidebar-title">&#128269; Search In</h3>
+          <div class="source-type-toggles">
+            <label class="source-toggle">
+              <input type="checkbox" id="searchDocs" checked />
+              <span>&#128196; Documents</span>
+            </label>
+            <label class="source-toggle">
+              <input type="checkbox" id="searchBitbucket" checked />
+              <span>&#128230; Bitbucket</span>
+            </label>
+            <label class="source-toggle">
+              <input type="checkbox" id="searchJira" checked />
+              <span>&#128203; Jira</span>
+            </label>
+          </div>
+          <div id="sourceSelectionList" class="source-selection-list">
+            <!-- Populated dynamically by app.js -->
+            <p class="source-hint">Add sources in the Knowledge Sources tab</p>
+          </div>
+        </div>
+
+        <!-- Settings Panel (hidden by default) -->
+        <div class="sidebar-section" id="settingsPanel" style="display:none">
+          <h3 class="sidebar-title">&#9881; Settings</h3>
+          <label class="setting-row">
+            <span>Streaming mode</span>
+            <input type="checkbox" id="streamingMode" checked />
+          </label>
+          <label class="setting-row">
+            <span>Show pipeline trace</span>
+            <input type="checkbox" id="showTrace" checked />
+          </label>
+          <label class="setting-row">
+            <span>Show noisy chunks</span>
+            <input type="checkbox" id="showNoisy" />
+          </label>
+        </div>
+      </aside>
+
+      <!-- CENTER: Chat Area -->
+      <main class="chat-area">
+
+        <!-- Welcome message -->
+        <div class="welcome-message" id="welcomeMessage">
+          <div class="welcome-icon">&#129302;</div>
+          <h2>Engineering RAG Assistant</h2>
+          <p>Add knowledge sources in the <strong>Knowledge Sources</strong> tab,<br/>
+             select which ones to search, then ask questions below.</p>
+          <div class="welcome-features">
+            <div class="feature-chip">&#9989; Documents</div>
+            <div class="feature-chip">&#9989; Bitbucket Code</div>
+            <div class="feature-chip">&#9989; Jira Issues</div>
+            <div class="feature-chip">&#9989; Citations</div>
+          </div>
+        </div>
+
+        <!-- Messages container -->
+        <div class="messages-container" id="messagesContainer"></div>
+
+        <!-- Input area -->
+        <div class="input-area">
+          <div class="input-wrapper">
+            <textarea
+              id="queryInput"
+              class="query-input"
+              placeholder="Ask a question about your selected sources..."
+              rows="1"
+              onkeydown="handleKeyDown(event)"
+              oninput="autoResize(this)"
+            ></textarea>
+            <button class="btn-send" id="sendBtn" onclick="sendQuery()" title="Send (Enter)">
+              <span id="sendIcon">&#9658;</span>
+            </button>
+          </div>
+          <div class="input-meta">
+            <span id="sessionInfo" class="session-info"></span>
+            <span class="input-hint">Enter to send &bull; Shift+Enter for new line</span>
+          </div>
+        </div>
+      </main>
+
+      <!-- RIGHT PANEL: RAG Internals -->
+      <aside class="sidebar-right" id="ragInternals">
+        <div class="panel-header">
+          <h3 class="sidebar-title">&#128301; RAG Internals</h3>
+          <span class="panel-subtitle">See how the pipeline works</span>
+        </div>
+
+        <div class="internals-section" id="evalSection" style="display:none">
+          <h4 class="section-title">&#128200; Evaluation Scores</h4>
+          <div class="eval-scores" id="evalScores"></div>
+          <div class="eval-note">Scores from RAGAS (0=bad, 1=perfect)</div>
+        </div>
+
+        <div class="internals-section" id="traceSection" style="display:none">
+          <h4 class="section-title">&#128279; Pipeline Steps</h4>
+          <div class="pipeline-trace" id="pipelineTrace"></div>
+        </div>
+
+        <div class="internals-section" id="trueDataSection" style="display:none">
+          <h4 class="section-title">&#9989; True Data Chunks</h4>
+          <div class="chunks-list" id="trueDataChunks"></div>
+        </div>
+
+        <div class="internals-section" id="noisyDataSection" style="display:none">
+          <h4 class="section-title">&#128683; Noisy Data (Filtered)</h4>
+          <div class="chunks-list" id="noisyDataChunks"></div>
+        </div>
+
+        <div class="internals-empty" id="internalsEmpty">
+          <p>Ask a question to see<br/>the RAG pipeline in action</p>
+        </div>
+      </aside>
+
+    </div><!-- end panel-chat -->
+
+
+    <!-- ==================================================
+         TAB 2: KNOWLEDGE SOURCES
+    ================================================== -->
+    <div class="tab-panel" id="panel-sources">
+      <div class="sources-container">
+
+        <div class="sources-header">
+          <h2 class="sources-title">&#128193; Knowledge Sources</h2>
+          <p class="sources-subtitle">Configure documents, repositories, and Jira projects to include in your knowledge base.</p>
+        </div>
+
+        <!-- Sub-tabs: Documents | Bitbucket | Jira -->
+        <div class="source-tabs">
+          <button class="source-tab active" id="stab-documents" onclick="switchSourceTab('documents')">
+            &#128196; Documents
+          </button>
+          <button class="source-tab" id="stab-bitbucket" onclick="switchSourceTab('bitbucket')">
+            &#128230; Bitbucket
+          </button>
+          <button class="source-tab" id="stab-jira" onclick="switchSourceTab('jira')">
+            &#128203; Jira
+          </button>
+        </div>
+
+        <!-- ---- Documents sub-panel ---- -->
+        <div class="source-panel active" id="spanel-documents">
+          <div class="source-panel-header">
+            <h3>Document Sources</h3>
+            <div class="source-panel-actions">
+              <div class="upload-area-inline" id="uploadAreaSources"
+                   ondrop="handleDropSources(event)" ondragover="handleDragOver(event)"
+                   ondragleave="handleDragLeave(event)">
+                <input type="file" id="fileInputSources" multiple
+                       accept=".pdf,.txt,.docx,.md"
+                       onchange="handleFileSelectSources(event)" style="display:none" />
+                <button class="btn-primary" onclick="document.getElementById('fileInputSources').click()">
+                  &#8679; Upload Documents
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="format-hint">Supported: PDF, DOCX, TXT, MD</div>
+
+          <!-- Upload progress (hidden by default) -->
+          <div id="uploadProgressSources" class="upload-progress-area" style="display:none"></div>
+
+          <!-- Document list -->
+          <div id="documentsList" class="sources-list">
+            <div class="sources-empty">
+              <span class="sources-empty-icon">&#128196;</span>
+              <p>No documents uploaded yet.<br/>Upload PDF, DOCX, TXT, or MD files to get started.</p>
+            </div>
+          </div>
+
+          <!-- Uploads from before document management (no original kept; remove only) -->
+          <div id="legacyDocumentsSection" class="legacy-section" style="display:none">
+            <h4 class="legacy-title">Older uploads</h4>
+            <p class="format-hint">Uploaded before document management, so their original files weren't kept and names are temporary. They are still searched. Remove any you no longer need, or re-upload a file to manage it here.</p>
+            <div id="legacyDocumentsList" class="sources-list"></div>
+          </div>
+        </div>
+
+        <!-- ---- Bitbucket sub-panel ---- -->
+        <div class="source-panel" id="spanel-bitbucket">
+          <div class="source-panel-header">
+            <h3>Bitbucket Repositories</h3>
+            <button class="btn-primary" onclick="showAddBitbucketModal()">
+              &#43; Add Repository
+            </button>
+          </div>
+
+          <div id="bitbucketList" class="sources-list">
+            <div class="sources-empty">
+              <span class="sources-empty-icon">&#128230;</span>
+              <p>No repositories added yet.<br/>Click "Add Repository" to connect a Bitbucket repository.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- Jira sub-panel ---- -->
+        <div class="source-panel" id="spanel-jira">
+          <div class="source-panel-header">
+            <h3>Jira Projects</h3>
+            <button class="btn-primary" onclick="showAddJiraModal()">
+              &#43; Add Jira Project
+            </button>
+          </div>
+
+          <div id="jiraList" class="sources-list">
+            <div class="sources-empty">
+              <span class="sources-empty-icon">&#128203;</span>
+              <p>No Jira projects added yet.<br/>Click "Add Jira Project" to connect a Jira project.</p>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- end sources-container -->
+    </div><!-- end panel-sources -->
+
+
+    <!-- ==================================================
+         TAB 3: INVESTIGATE
+    ================================================== -->
+    <div class="tab-panel" id="panel-investigate">
+      <div class="investigate-container">
+
+        <div class="sources-header">
+          <h2 class="sources-title">&#128269; Investigate Failure</h2>
+          <p class="sources-subtitle">Paste an error or failure log. The assistant will search selected sources for root cause evidence.</p>
+        </div>
+
+        <div class="investigate-layout">
+          <!-- Left: input -->
+          <div class="investigate-input-panel">
+            <label class="field-label">Failure Log / Error Message</label>
+            <textarea
+              id="failureLogInput"
+              class="failure-log-input"
+              placeholder="Paste error log, stack trace, or failure description here..."
+              rows="10"
+            ></textarea>
+
+            <label class="field-label" style="margin-top:16px">Sources to Search</label>
+            <div id="investigateSourceList" class="source-selection-list">
+              <p class="source-hint">Add sources in the Knowledge Sources tab</p>
+            </div>
+
+            <button class="btn-primary btn-investigate" onclick="runInvestigation()" id="investigateBtn">
+              &#128269; Investigate
+            </button>
+          </div>
+
+          <!-- Right: report -->
+          <div class="investigate-report-panel" id="investigateReport">
+            <div class="sources-empty">
+              <span class="sources-empty-icon">&#128269;</span>
+              <p>Enter an error and click Investigate<br/>to generate a root cause report.</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- end panel-investigate -->
+
+  </div><!-- end main-content -->
+</div><!-- end app-container -->
+
+<!-- ===== NOTIFICATION TOAST ===== -->
+<div class="toast" id="toast"></div>
+
+<!-- ===== MODALS ===== -->
+
+<!-- Add Bitbucket Repository Modal -->
+<div class="modal-overlay" id="modalBitbucket" style="display:none" onclick="closeModal('modalBitbucket')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128230; Add Bitbucket Repository</h3>
+      <button class="modal-close" onclick="closeModal('modalBitbucket')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="field-label">Bitbucket URL / Workspace</label>
+        <input type="text" id="bbWorkspace" class="form-input" placeholder="my-workspace" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Repository</label>
+        <input type="text" id="bbRepository" class="form-input" placeholder="my-repository" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Branch</label>
+        <input type="text" id="bbBranch" class="form-input" value="main" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Username / Email</label>
+        <input type="text" id="bbUsername" class="form-input" placeholder="username@company.com" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Access Token / App Password</label>
+        <input type="password" id="bbToken" class="form-input" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password" />
+        <small class="field-hint">Token is encrypted before storage. It will not be displayed again.</small>
+      </div>
+      <div id="bbTestResult" class="connection-result" style="display:none"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="testBitbucketConnection()">&#128172; Test Connection</button>
+      <button class="btn-primary" onclick="addBitbucketSource()" id="bbAddBtn" disabled>&#43; Add Repository</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Jira Project Modal -->
+<div class="modal-overlay" id="modalJira" style="display:none" onclick="closeModal('modalJira')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128203; Add Jira Project</h3>
+      <button class="modal-close" onclick="closeModal('modalJira')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="field-label">Jira URL</label>
+        <input type="text" id="jiraBaseUrl" class="form-input" placeholder="https://company.atlassian.net" autocomplete="url" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Project Key</label>
+        <input type="text" id="jiraProjectKey" class="form-input" placeholder="BT" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Email / Username</label>
+        <input type="text" id="jiraEmail" class="form-input" placeholder="username@company.com" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">API Token</label>
+        <input type="password" id="jiraToken" class="form-input" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password" />
+        <small class="field-hint">Token is encrypted before storage. It will not be displayed again.</small>
+      </div>
+      <div id="jiraTestResult" class="connection-result" style="display:none"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="testJiraConnection()">&#128172; Test Connection</button>
+      <button class="btn-primary" onclick="addJiraSource()" id="jiraAddBtn" disabled>&#43; Add Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div class="modal-overlay" id="modalConfirmDelete" style="display:none" onclick="closeModal('modalConfirmDelete')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128465; Confirm Delete</h3>
+      <button class="modal-close" onclick="closeModal('modalConfirmDelete')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p id="confirmDeleteMessage">Are you sure you want to delete this source?</p>
+      <p class="field-hint">This will remove the source and all its indexed chunks from the vector store.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modalConfirmDelete')">Cancel</button>
+      <button class="btn-danger" id="confirmDeleteBtn" onclick="executeDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=theme-20261002"></script>
+</body>
+</html>

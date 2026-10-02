@@ -1,0 +1,15 @@
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+data/
+!data/hf_cache/
+*.egg-info
+.venv
+venv
+notebooks/
+tests/
+service-account-key.json

@@ -1,0 +1,50 @@
+# Environment & Secrets - NEVER commit these
+.env
+*.env
+service-account-key.json
+*-key.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+.venv-macos/
+venv/
+env/
+
+# Data (can be large, regenerate with ingest)
+data/
+*.db
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# IDEs
+.vscode/settings.json
+.idea/
+*.swp
+
+# Terraform state (contains sensitive values)
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/.terraform.lock.hcl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Installers and stray files (never commit binaries over GitHub's 100 MB limit)
+*.exe
+OllamaSetup.exe
+42.0.0
+*.ses
