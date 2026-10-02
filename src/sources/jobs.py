@@ -6,6 +6,7 @@ status (indexing -> ready / error). One job per source at a time.
 """
 
 import threading
+import time
 from datetime import datetime, timezone
 
 from src.sources.models import SourceStatus
@@ -24,6 +25,37 @@ class IndexJobRunner:
         self.registry = registry if registry is not None else source_registry
         self._running = set()
         self._lock = threading.Lock()
+        self._progress = {}   # source_id -> current stage of a running job
+
+    def report(self, source_id: str, stage: str, done: int = None, total: int = None, unit: str = "") -> None:
+        """Record what a running job is doing, for the UI and the server log."""
+        with self._lock:
+            entry = self._progress.get(source_id)
+            if entry is None:
+                return
+            changed = entry["stage"] != stage
+            # Log stage changes and every 10% within a stage, so long steps stay visible in the server log.
+            decile = int(10 * done / total) if (done is not None and total) else None
+            log = changed or (decile is not None and decile != entry.get("logged_decile"))
+            entry.update(stage=stage, done=done, total=total, unit=unit,
+                         logged_decile=decile if log else entry.get("logged_decile"))
+        if log:
+            percent = f" ({round(100 * done / total)}%)" if decile is not None else ""
+            logger.info("index_progress", source_id=source_id,
+                        stage=f"{stage}{'' if done is None else f' {done}/{total or '?'} {unit}'}{percent}")
+
+    def progress(self) -> dict:
+        """Snapshot of running jobs with elapsed seconds and percent (when the total is known)."""
+        now = time.time()
+        with self._lock:
+            out = {}
+            for source_id, entry in self._progress.items():
+                item = {k: v for k, v in entry.items() if k not in ("started", "logged_decile")}
+                item["elapsed_seconds"] = int(now - entry["started"])
+                item["percent"] = (round(100 * entry["done"] / entry["total"])
+                                   if entry.get("total") and entry.get("done") is not None else None)
+                out[source_id] = item
+            return out
 
     def is_running(self, source_id: str) -> bool:
         with self._lock:
@@ -38,6 +70,8 @@ class IndexJobRunner:
             if source_id in self._running:
                 return False
             self._running.add(source_id)
+            self._progress[source_id] = {"stage": "Starting", "done": None, "total": None, "unit": "",
+                                         "started": time.time()}
         self.registry.update_source_status(source_id, SourceStatus.INDEXING)
         if background:
             threading.Thread(target=self._run, args=(source_id, job),
@@ -66,6 +100,7 @@ class IndexJobRunner:
         finally:
             with self._lock:
                 self._running.discard(source_id)
+                self._progress.pop(source_id, None)
 
     def recover_interrupted(self) -> None:
         """Jobs do not survive a restart; mark sources left mid-index as failed."""
@@ -78,3 +113,7 @@ class IndexJobRunner:
 
 
 index_jobs = IndexJobRunner()
+
+
+def report_progress(source_id: str, stage: str, done: int = None, total: int = None, unit: str = "") -> None:
+    index_jobs.report(source_id, stage, done, total, unit)

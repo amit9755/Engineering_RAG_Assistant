@@ -23,6 +23,7 @@ const state = {
   // Source management state
   allSources: { documents: [], legacy: [], bitbucket: [], jira: [] },
   sourcePollTimer: null,
+  progress: {},         // source id -> live indexing progress from /sources/progress
   sourceStatuses: {},   // id -> last seen status, to announce finished indexing
   pendingDelete: null,  // { type, id, name }
   bbConnectionTested: false,
@@ -607,12 +608,14 @@ function switchSourceTab(tab) {
 
 async function loadAllSources() {
   try {
-    const [docsRes, legacyRes, bbRes, jiraRes] = await Promise.all([
+    const [docsRes, legacyRes, bbRes, jiraRes, progressRes] = await Promise.all([
       fetch(`${API_BASE}/sources/documents`),
       fetch(`${API_BASE}/sources/documents/legacy`),
       fetch(`${API_BASE}/sources/bitbucket`),
       fetch(`${API_BASE}/sources/jira`),
+      fetch(`${API_BASE}/sources/progress`),
     ]);
+    state.progress = progressRes.ok ? await progressRes.json() : {};
 
     state.allSources.documents = docsRes.ok ? await docsRes.json() : [];
     state.allSources.legacy = legacyRes.ok ? await legacyRes.json() : [];
@@ -742,7 +745,7 @@ function trackIndexingProgress() {
 
   clearTimeout(state.sourcePollTimer);
   if (all.some(src => src.status === 'indexing' || src.status === 'syncing')) {
-    state.sourcePollTimer = setTimeout(loadAllSources, 3000);
+    state.sourcePollTimer = setTimeout(loadAllSources, 2000);
   }
 }
 
@@ -757,6 +760,31 @@ async function startSourceJob(type, id, action) {
   } finally {
     await loadAllSources();
   }
+}
+
+function formatElapsed(seconds) {
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return m ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Live stage, counts, bar and elapsed time for a source that is being indexed.
+function indexProgressHtml(src) {
+  if (src.status !== 'indexing' && src.status !== 'syncing') return '';
+  const p = state.progress[src.id];
+  if (!p) return '<div class="index-progress"><div class="index-progress-text">Starting...</div></div>';
+  const fmt = n => Number(n).toLocaleString();
+  let count = '';
+  if (p.done !== null && p.done !== undefined) {
+    count = ` &middot; ${fmt(p.done)}${p.total ? ' / ' + fmt(p.total) : ''} ${escapeHtml(p.unit || '')}`;
+  }
+  const pct = p.percent !== null && p.percent !== undefined ? ` (${p.percent}%)` : '';
+  const bar = p.percent !== null && p.percent !== undefined
+    ? `<div class="index-progress-bar"><div style="width:${p.percent}%"></div></div>`
+    : '<div class="index-progress-bar indeterminate"><div></div></div>';
+  return `<div class="index-progress">
+      ${bar}
+      <div class="index-progress-text">${escapeHtml(p.stage)}${count}${pct} &middot; ${formatElapsed(p.elapsed_seconds)}</div>
+    </div>`;
 }
 
 function sourceJobButtons(type, src) {
@@ -908,6 +936,7 @@ function renderBitbucketList() {
           </div>
           ${repo.last_commit ? `<div class="source-card-commit">Indexed commit: ${escapeHtml(repo.last_commit.slice(0, 12))}${repo.last_sync ? ' &middot; ' + new Date(repo.last_sync).toLocaleString() : ''}</div>` : ''}
           ${repo.status === 'pending' ? '<div class="source-card-commit">Not indexed yet. Click Index so chat can answer from this repository.</div>' : ''}
+          ${indexProgressHtml(repo)}
           ${repo.error_message ? `<p class="status-err">${escapeHtml(repo.error_message)}</p>` : ''}
         </div>
         <div class="source-card-actions">
@@ -953,6 +982,7 @@ function renderJiraList() {
           </div>
           <div class="source-card-commit">Last sync: ${syncDate}</div>
           ${proj.status === 'pending' ? '<div class="source-card-commit">Not indexed yet. Click Index so chat can answer from these issues.</div>' : ''}
+          ${indexProgressHtml(proj)}
           ${proj.error_message ? `<p class="status-err">${escapeHtml(proj.error_message)}</p>` : ''}
         </div>
         <div class="source-card-actions">

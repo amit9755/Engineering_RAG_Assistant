@@ -69,7 +69,7 @@ class FakeBitbucket:
     def get_repository(self, workspace, repository):
         return {"mainbranch": {"name": self.default}}
 
-    def download_archive(self, workspace, repository, commit):
+    def download_archive(self, workspace, repository, commit, on_progress=None):
         self.downloads += 1
         return repo_zip(self.files)
 
@@ -513,3 +513,19 @@ def test_no_context_answer_points_out_unindexed_sources(registry, monkeypatch):
     assert nodes.unindexed_sources(SourceFilter(["other"], [])) == []
     answer = nodes.no_context_answer(["- Document: a.pdf (6 chunks)"], "what does this repo do?", ["ws/repo"])
     assert "Not searchable yet:** ws/repo" in answer and "click **Index**" in answer
+
+
+def test_job_progress_is_reported_while_running_and_cleared_after(registry):
+    add_repo(registry)
+    jobs = IndexJobRunner(registry)
+    seen = {}
+
+    def job(source_id):
+        jobs.report(source_id, "Embedding chunks", 128, 512, "chunks")
+        seen.update(jobs.progress()[source_id])
+        return 512
+    jobs.start("bb-1", job, background=False)
+    assert seen["stage"] == "Embedding chunks" and seen["percent"] == 25 and seen["unit"] == "chunks"
+    assert jobs.progress() == {}  # finished jobs are removed
+    jobs.report("bb-1", "ignored")  # reports for jobs that are not running are ignored
+    assert jobs.progress() == {}

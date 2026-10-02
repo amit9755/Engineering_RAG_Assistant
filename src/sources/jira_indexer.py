@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.sources.credentials import credential_store
-from src.sources.jobs import IndexingError
+from src.sources.jobs import IndexingError, report_progress
 from src.sources.registry import source_registry
 from src.observability.logger import get_logger
 
@@ -114,7 +114,7 @@ class JiraClient:
             raise IndexingError("The Jira account lacks permission to browse this project.")
         return response
 
-    def search_issues(self, project_key: str):
+    def search_issues(self, project_key: str, on_page=None):
         jql = f'project = "{project_key}" ORDER BY updated DESC'
         issues, token = [], None
         while len(issues) < MAX_ISSUES:
@@ -127,6 +127,8 @@ class JiraClient:
             self._raise_for_search(response, project_key)
             data = response.json()
             issues += data.get("issues", [])
+            if on_page:
+                on_page(len(issues))
             token = data.get("nextPageToken")
             if not token or data.get("isLast"):
                 break
@@ -190,7 +192,9 @@ class JiraIndexer:
         except (KeyError, ValueError) as exc:
             raise IndexingError("Saved Jira credentials are missing. Delete and re-add the project.") from exc
 
-        issues = self.client_factory(cfg.base_url, email, token).search_issues(cfg.project_key)
+        report_progress(source_id, "Fetching issues", 0, None, "issues")
+        issues = self.client_factory(cfg.base_url, email, token).search_issues(
+            cfg.project_key, on_page=lambda n: report_progress(source_id, "Fetching issues", n, None, "issues"))
         if not issues:
             raise IndexingError(f"No issues found in project {cfg.project_key} (or the account cannot see them).")
 
@@ -218,7 +222,11 @@ class JiraIndexer:
                     },
                 ))
 
-        self.vectors.replace_source_documents(source_id, documents)
+        report_progress(source_id, "Embedding chunks", 0, len(documents), "chunks")
+        self.vectors.replace_source_documents(
+            source_id, documents,
+            on_progress=lambda done, total: report_progress(source_id, "Embedding chunks", done, total, "chunks"))
+        report_progress(source_id, "Updating keyword search")
         self.refresh_search()
         latest = max(((i.get("fields") or {}).get("updated") or "") for i in issues)
         self.registry.update_jira_config(source_id, issue_count=len(issues),

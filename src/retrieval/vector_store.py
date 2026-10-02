@@ -170,8 +170,12 @@ class VectorStore:
             collection.delete(ids=ids)
         return len(ids)
 
-    def replace_source_documents(self, source_id: str, documents: List[Document]) -> List[str]:
-        """Index a new revision before removing old chunks; preserve old data on failure."""
+    def replace_source_documents(self, source_id: str, documents: List[Document],
+                                 on_progress=None) -> List[str]:
+        """
+        Index a new revision before removing old chunks; preserve old data on failure.
+        on_progress(done, total) is called after each embedded batch.
+        """
         import uuid
 
         if settings.vector_store_type != "chroma":
@@ -188,6 +192,8 @@ class VectorStore:
             for start in range(0, len(documents), self.ADD_BATCH_SIZE):
                 end = start + self.ADD_BATCH_SIZE
                 self._store.add_documents(documents[start:end], ids=new_ids[start:end])
+                if on_progress:
+                    on_progress(min(end, len(documents)), len(documents))
             if old_ids:
                 collection.delete(ids=old_ids)
         except Exception:

@@ -18,7 +18,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.sources.credentials import credential_store
-from src.sources.jobs import IndexingError
+from src.sources.jobs import IndexingError, report_progress
 from src.sources.registry import source_registry
 from src.observability.logger import get_logger
 
@@ -141,12 +141,12 @@ class BitbucketClient:
         response.raise_for_status()
         return response.json()["target"]["hash"]
 
-    def download_archive(self, workspace, repository, commit) -> bytes:
+    def download_archive(self, workspace, repository, commit, on_progress=None) -> bytes:
         url = f"{WEB_BASE}/{workspace}/{repository}/get/{commit}.zip"
         response = self._get(url, stream=True, timeout=120)
         if response.status_code != 200:
             raise IndexingError(f"Downloading the repository archive failed (HTTP {response.status_code}).")
-        return _read_limited(response)
+        return _read_limited(response, on_progress)
 
 
 class BitbucketServerClient:
@@ -228,7 +228,7 @@ class BitbucketServerClient:
                 return ref.get("latestCommit")
         return None
 
-    def download_archive(self, project, repository, commit) -> bytes:
+    def download_archive(self, project, repository, commit, on_progress=None) -> bytes:
         # prefix gives entries the same "<folder>/" layout as Bitbucket Cloud archives.
         # The archive is binary: asking for JSON makes the server answer 406 Not Acceptable.
         response = self._get(self._api(project, repository, "/archive"), accept="*/*",
@@ -236,18 +236,25 @@ class BitbucketServerClient:
                              stream=True, timeout=300)
         if response.status_code != 200:
             raise IndexingError(f"Downloading the repository archive failed (HTTP {response.status_code}).")
-        return _read_limited(response)
+        return _read_limited(response, on_progress)
 
     def file_url(self, project, repository, commit, path=None):
         base = f"{self.base}/projects/{project}/repos/{repository}/browse"
         return f"{base}/{path}?at={commit}" if path else base
 
 
-def _read_limited(response) -> bytes:
+def _read_limited(response, on_progress=None) -> bytes:
+    """Read a streamed download, enforcing the size limit. on_progress(bytes_so_far, bytes_total_or_None)."""
+    try:
+        expected = int(response.headers.get("Content-Length") or 0) or None
+    except (AttributeError, TypeError, ValueError):
+        expected = None
     with tempfile.SpooledTemporaryFile(max_size=50 * 1024 * 1024) as buffer:
         total = 0
         for block in response.iter_content(1024 * 1024):
             total += len(block)
+            if on_progress:
+                on_progress(total, expected)
             if total > MAX_ARCHIVE_BYTES:
                 raise IndexingError("Repository archive exceeds 300 MB; it is too large to index locally.")
             buffer.write(block)
@@ -402,6 +409,7 @@ class BitbucketIndexer:
         cfg = self.registry.get_bitbucket_config(source_id)
         if not source or not cfg:
             raise IndexingError("Bitbucket source not found.")
+        report_progress(source_id, "Checking for new commits")
         branch, commit = resolve_branch(self._client(cfg), cfg)
         if commit == cfg.last_commit and branch == cfg.branch and source.chunk_count:
             logger.info("bitbucket_sync_up_to_date", source_id=source_id, commit=commit[:12])
@@ -415,12 +423,28 @@ class BitbucketIndexer:
         if not source or not cfg:
             raise IndexingError("Bitbucket source not found.")
         client = self._client(cfg)
+        report_progress(source_id, "Checking branch")
         branch, commit = resolve_branch(client, cfg)
         logger.info("bitbucket_index_start", source_id=source_id, branch=branch, commit=commit[:12])
-        archive = client.download_archive(cfg.workspace, cfg.repository, commit)
+
+        mb = 1024 * 1024
+        report_progress(source_id, "Downloading repository", 0, None, "MB")
+        archive = client.download_archive(
+            cfg.workspace, cfg.repository, commit,
+            on_progress=lambda got, size: report_progress(
+                source_id, "Downloading repository", round(got / mb, 1), round(size / mb, 1) if size else None, "MB"))
+
+        report_progress(source_id, "Reading and splitting files")
         documents, file_count = build_documents(archive, source, cfg, branch, commit,
                                                getattr(client, "file_url", None))
-        self.vectors.replace_source_documents(source_id, documents)
+        logger.info("bitbucket_files_read", source_id=source_id, files=file_count, chunks=len(documents))
+
+        # Embedding runs on the CPU and is the slow step for large repositories.
+        report_progress(source_id, "Embedding chunks", 0, len(documents), "chunks")
+        self.vectors.replace_source_documents(
+            source_id, documents,
+            on_progress=lambda done, total: report_progress(source_id, "Embedding chunks", done, total, "chunks"))
+        report_progress(source_id, "Updating keyword search")
         self.refresh_search()
         self.registry.update_bitbucket_config(source_id, branch=branch, last_commit=commit, file_count=file_count)
         logger.info("bitbucket_index_done", source_id=source_id, files=file_count, chunks=len(documents))
