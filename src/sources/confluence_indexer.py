@@ -123,7 +123,7 @@ class ConfluenceClient:
             space = self.api.get(f"/rest/api/space/{space_key}")
             if space.status_code == 404:
                 raise IndexingError(f"Space '{space_key}' was not found or is not visible to this account.")
-        return {"spaces_found": response.json().get("size")}
+        return {"spaces_found": self.api.json(response, "connection test").get("size")}
 
     def list_spaces(self, limit: int = 1000) -> list:
         spaces, start = [], 0
@@ -131,7 +131,7 @@ class ConfluenceClient:
             response = self.api.get("/rest/api/space", {"limit": 100, "start": start})
             if response.status_code != 200:
                 raise IndexingError(f"Listing Confluence spaces failed (HTTP {response.status_code}).")
-            data = response.json()
+            data = self.api.json(response, "space list")
             batch = data.get("results", [])
             spaces += [{"key": s["key"], "name": s.get("name") or s["key"], "type": s.get("type", "")}
                        for s in batch]
@@ -150,7 +150,7 @@ class ConfluenceClient:
                 raise IndexingError(f"Space '{space_key}' was not found or is not visible to this account.")
             if response.status_code != 200:
                 raise IndexingError(f"Fetching Confluence pages failed (HTTP {response.status_code}).")
-            data = response.json()
+            data = self.api.json(response, "page list")
             batch = data.get("results", [])
             pages += batch
             if on_page:

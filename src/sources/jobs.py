@@ -99,7 +99,7 @@ class IndexJobRunner:
             logger.exception("index_job_crashed", source_id=source_id)
             self.registry.update_source_status(
                 source_id, SourceStatus.ERROR,
-                error_message=f"Indexing failed unexpectedly ({type(exc).__name__}). "
+                error_message=f"Indexing failed unexpectedly ({type(exc).__name__}: {str(exc)[:200]}). "
                               "Previously indexed content was kept; retry indexing.",
             )
         finally:

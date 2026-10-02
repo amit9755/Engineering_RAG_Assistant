@@ -180,3 +180,33 @@ def test_unexpected_bitbucket_status_is_a_readable_error():
     session.get.return_value = response(400, {"error": {"message": "Bad request"}})
     with pytest.raises(IndexingError, match="HTTP 400: Bad request"):
         BitbucketClient("x", "bad", session).list_repositories("ws")
+
+
+def html_response(status, title, url="https://jira.example.com/rest/api/2/search"):
+    r = Mock(status_code=status, url=url, text=f"<html><head><title>{title}</title></head><body>x</body></html>",
+             headers={"Content-Type": "text/html;charset=UTF-8"})
+    r.json.side_effect = ValueError("Expecting value")
+    return r
+
+
+def test_jira_server_searches_with_api_v2_directly():
+    from src.sources.jira_indexer import JiraClient
+    from tests.test_connectors import ISSUE
+    session = Mock()
+    session.get.return_value = response(200, {"issues": [ISSUE], "total": 1})
+    pages = []
+    issues = JiraClient("https://jira.sw.example.com", "", "pat", session).search_issues("WSQ", on_page=pages.append)
+    assert len(issues) == 1 and pages == [1]
+    assert session.get.call_args_list[0].args[0] == "https://jira.sw.example.com/rest/api/2/search"
+
+
+def test_web_page_instead_of_data_is_a_readable_error():
+    from src.sources.jira_indexer import JiraClient
+    session = Mock()
+    session.get.return_value = html_response(200, "Log in - NXP SSO", "https://sso.example.com/login")
+    with pytest.raises(IndexingError, match="web page instead of data.*Log in - NXP SSO.*login page"):
+        JiraClient("https://jira.sw.example.com", "", "pat", session).search_issues("WSQ")
+    other = Mock()
+    other.get.return_value = html_response(200, "Dashboard")
+    with pytest.raises(IndexingError, match="Dashboard.*base address"):
+        ConfluenceClient("https://confluence.example.com", "", "pat", other).fetch_pages("WSQ")

@@ -113,16 +113,19 @@ class JiraClient:
         if me.status_code != 200:
             raise IndexingError(f"Jira returned HTTP {me.status_code} for the connection test.")
         projects = self._get("/rest/api/2/project", None)
-        count = len(projects.json()) if projects.status_code == 200 else None
+        count = len(self.api.json(projects, "project list")) if projects.status_code == 200 else None
         if project_key:
             project = self._get(f"/rest/api/2/project/{project_key}", None)
             if project.status_code == 404:
                 raise IndexingError(f"Project '{project_key}' was not found or is not visible to this account.")
-        data = me.json()
+        data = self.api.json(me, "connection test")
         return {"display_name": data.get("displayName") or data.get("name"), "projects_found": count}
 
     def search_issues(self, project_key: str, on_page=None):
         jql = f'project = "{project_key}" ORDER BY updated DESC'
+        if not self.api.cloud:
+            # /rest/api/3/search/jql exists only on Jira Cloud; Server / Data Center uses API v2.
+            return self._search_issues_v2(jql, project_key, on_page)
         issues, token = [], None
         while len(issues) < MAX_ISSUES:
             params = {"jql": jql, "fields": FIELDS, "maxResults": PAGE_SIZE}
@@ -130,9 +133,9 @@ class JiraClient:
                 params["nextPageToken"] = token
             response = self._get("/rest/api/3/search/jql", params)
             if response.status_code in (404, 405, 410) and not issues:
-                return self._search_issues_v2(jql)
+                return self._search_issues_v2(jql, project_key, on_page)
             self._raise_for_search(response, project_key)
-            data = response.json()
+            data = self.api.json(response, "issue search")
             issues += data.get("issues", [])
             if on_page:
                 on_page(len(issues))
@@ -141,16 +144,18 @@ class JiraClient:
                 break
         return issues[:MAX_ISSUES]
 
-    def _search_issues_v2(self, jql):
-        """Jira Server / Data Center fallback (offset pagination)."""
+    def _search_issues_v2(self, jql, project_key=None, on_page=None):
+        """Jira Server / Data Center search (offset pagination)."""
         issues = []
         while len(issues) < MAX_ISSUES:
             response = self._get("/rest/api/2/search",
                                  {"jql": jql, "fields": FIELDS, "maxResults": PAGE_SIZE, "startAt": len(issues)})
-            self._raise_for_search(response, None)
-            data = response.json()
+            self._raise_for_search(response, project_key)
+            data = self.api.json(response, "issue search")
             page = data.get("issues", [])
             issues += page
+            if on_page:
+                on_page(len(issues))
             if not page or len(issues) >= data.get("total", 0):
                 break
         return issues[:MAX_ISSUES]

@@ -265,10 +265,15 @@ def test_jira_client_paginates_and_falls_back_to_server_api():
     assert len(JiraClient("https://acme.atlassian.net", "e", "t", session).search_issues("BT")) == 2
     assert session.get.call_args.kwargs["params"]["nextPageToken"] == "p2"
 
-    server = Mock()
-    server.get.side_effect = [response(404), response(200, {"issues": [ISSUE], "total": 1})]
+    server = Mock()  # Jira Server / Data Center goes straight to API v2
+    server.get.side_effect = [response(200, {"issues": [ISSUE], "total": 1})]
     assert len(JiraClient("https://jira.local", "e", "t", server).search_issues("BT")) == 1
     assert server.get.call_args.args[0] == "https://jira.local/rest/api/2/search"
+
+    cloud_without_v3 = Mock()  # a Cloud site without the new endpoint still falls back
+    cloud_without_v3.get.side_effect = [response(404), response(200, {"issues": [ISSUE], "total": 1})]
+    assert len(JiraClient("https://acme.atlassian.net", "e", "t", cloud_without_v3).search_issues("BT")) == 1
+    assert cloud_without_v3.get.call_args.args[0] == "https://acme.atlassian.net/rest/api/2/search"
 
 
 def test_jira_auth_failure_is_a_readable_error():

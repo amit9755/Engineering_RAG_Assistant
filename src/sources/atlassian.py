@@ -7,6 +7,8 @@ Token sent as a Bearer token; if that is rejected and a username was given,
 username + token (or password) as Basic auth is tried, as older servers expect.
 """
 
+import re
+from html import unescape
 from urllib.parse import urlparse
 
 import requests
@@ -56,6 +58,28 @@ class AtlassianSession:
         if response.status_code == 403:
             raise IndexingError(f"The {self.product} account lacks permission for this request.")
         return response
+
+    def json(self, response, what: str = "request"):
+        """
+        Parse a JSON response. A company server that answers with a web page (an SSO /
+        login page, a proxy notice, or an error page for an unknown address) raises a
+        readable IndexingError instead of a JSONDecodeError.
+        """
+        content_type = (response.headers.get("Content-Type") or "").lower() if hasattr(response, "headers") else ""
+        try:
+            return response.json()
+        except ValueError:
+            body = response.text or "" if isinstance(getattr(response, "text", None), str) else ""
+            title = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+            title = " ".join(unescape(title.group(1)).split())[:120] if title else ""
+            final_url = getattr(response, "url", "") or ""
+            login = bool(re.search(r"login|sso|saml|signin|auth", f"{title} {final_url}", re.I))
+            hint = (" The server sent a login page: the token was not accepted for API access, or the request was "
+                    "redirected to single sign-on. Check the token, and that the URL is the server's base address."
+                    if login else " Check that the URL is the server's base address (as shown in your browser).")
+            raise IndexingError(f"{self.product} returned a web page instead of data for the {what} "
+                                f"(HTTP {response.status_code}{', ' + content_type.split(';')[0] if content_type else ''}"
+                                f"{', page: ' + repr(title) if title else ''}).{hint}")
 
     def auth_hint(self) -> str:
         if self.cloud:
