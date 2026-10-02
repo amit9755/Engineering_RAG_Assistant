@@ -11,6 +11,7 @@
 #   Conditional edges allow branching (e.g., skip generation if unsafe).
 # ============================================================
 
+import re
 import time
 from typing import Dict, Any, List
 
@@ -177,14 +178,79 @@ files, and Jira issues.
 
 How to answer:
 - If the user asks several questions, answer each one under its own short heading.
-- Explain in your own words, then cite where it comes from in parentheses using the
-  file path or Jira key, e.g. (lib/instagram/publish.ts) or (BT-12).
+- Explain in your own words, then cite in parentheses the file path or Jira key
+  copied exactly from the header of the numbered source you used.
+- Only cite paths and keys that appear in the source headers below. Never make one up.
 - For code, name the files, functions, and steps involved; quote a few key lines when useful.
 - If the sources do not cover a question, say so for that question only and answer the rest.
+- If the user asks what you know or how you can help, describe the knowledge sources listed
+  below instead of general abilities.
 - Never invent files, functions, or behaviour that the sources do not show.
+
+Knowledge sources the user selected:
+{catalog}
 
 Sources:
 {context}"""
+
+
+def knowledge_catalog(source_filter=None) -> List[str]:
+    """Readable list of the searchable sources, limited to the chat selection."""
+    try:
+        from src.sources.registry import source_registry
+        from src.retrieval.vector_store import vector_store
+        kinds = {"document": "Document", "bitbucket": "Bitbucket repository", "jira": "Jira project"}
+        lines = []
+        for src in source_registry.list_sources():
+            if not src.chunk_count:
+                continue
+            if source_filter is not None and src.id not in source_filter.source_ids:
+                continue
+            lines.append(f"- {kinds.get(src.type.value, src.type.value)}: {src.name} ({src.chunk_count} chunks)")
+        for legacy in vector_store.list_legacy_files():
+            if source_filter is None or legacy["source_file"] in source_filter.legacy_files:
+                lines.append(f"- Older upload: {legacy['source_file']} ({legacy['chunk_count']} chunks)")
+        return lines
+    except Exception as exc:
+        logger.warning("knowledge_catalog_failed", error=str(exc))
+        return []
+
+
+_ABOUT_ASSISTANT = re.compile(
+    r"\b(help me|can you (do|help)|what (can|do) you|your (knowledge|sources)|"
+    r"(what'?s?|which) (knowledge|sources|data|documents)|knowledge (do )?you have|you know|"
+    r"about yourself|who are you)\b", re.I)
+
+
+def no_context_answer(catalog: List[str], query: str = "") -> str:
+    """Answer used instead of the LLM when retrieval found nothing, so nothing is invented."""
+    if catalog and _ABOUT_ASSISTANT.search(query or ""):
+        return ("I answer questions using only the knowledge sources you've connected, and I cite "
+                "the file, document, or Jira issue each answer comes from.\n\n"
+                "**Sources I can search right now:**\n" + "\n".join(catalog) +
+                "\n\nAsk about something in them, for example how a feature works, which files "
+                "implement something, or what an issue is about.")
+    if not catalog:
+        return ("Your knowledge base has nothing to search yet (or no sources are selected).\n\n"
+                "Add documents, a Bitbucket repository, or a Jira project under **Knowledge Sources** "
+                "(click **Index** for repositories and projects), tick them under **Search In**, "
+                "then ask again.")
+    return ("I couldn't find anything relevant to that in the selected sources, so I won't guess.\n\n"
+            "**I can answer questions about:**\n" + "\n".join(catalog) +
+            "\n\nTry asking about something specific in these sources, for example a feature, "
+            "file, workflow, or issue, or select more sources under **Search In**.")
+
+
+def build_messages(query: str, context: str, catalog: List[str], history: List[Dict],
+                   original_query: str) -> List[Dict]:
+    """System prompt + last 2 turns + question. The UI sends the current question as the last history item."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(
+        context=context, catalog="\n".join(catalog) or "(none)")}]
+    if history and history[-1].get("content") == original_query:
+        history = history[:-1]
+    messages += [{"role": m["role"], "content": m["content"]} for m in history[-4:]]
+    messages.append({"role": "user", "content": query})
+    return messages
 
 
 def format_context(chunks: List[Dict]) -> str:
@@ -327,19 +393,18 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
 
     query = state.get("rewritten_query") or state.get("original_query", "")
     context = state.get("assembled_context", "No context available.")
-    history = state.get("conversation_history", [])
+    catalog = knowledge_catalog(state.get("source_filter"))
 
-    # Build the prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
+    steps = state.get("pipeline_steps", [])
+    if not state.get("true_data_chunks"):
+        # Nothing relevant was retrieved: a small model would answer from general
+        # knowledge and invent citations, so answer honestly without calling it.
+        steps.append("generation")
+        return {"llm_response": no_context_answer(catalog, state.get("original_query", "")), "model_used": "none (no matching sources)",
+                "pipeline_steps": steps}
 
-    # Add recent history for conversational continuity. The UI sends the
-    # current question as the last history item; don't repeat it.
-    if history and history[-1].get("content") == state.get("original_query"):
-        history = history[:-1]
-    for msg in history[-4:]:  # last 2 turns
-        messages.append({"role": msg["role"], "content": msg["content"]})
-
-    messages.append({"role": "user", "content": query})
+    messages = build_messages(query, context, catalog, state.get("conversation_history", []),
+                              state.get("original_query", ""))
 
     try:
         response = llm_gateway.complete(messages, temperature=0.1, max_tokens=1500)

@@ -351,3 +351,54 @@ def test_keyword_index_is_built_on_first_search_after_restart(monkeypatch):
     retriever._ensure_bm25()
     retriever._ensure_bm25()
     refresh.assert_called_once()
+
+
+# ---------------------------------------------------------------- no-context answers
+
+def test_generation_skips_llm_and_lists_sources_when_nothing_is_retrieved(monkeypatch):
+    from src.graph import nodes
+    monkeypatch.setattr(nodes, "knowledge_catalog", lambda f=None: ["- Bitbucket repository: ws/repo (10 chunks)"])
+    llm = Mock()
+    monkeypatch.setattr("src.gateway.llm_gateway.llm_gateway.complete", llm)
+    out = nodes.generation_node({"original_query": "how can you help me", "true_data_chunks": [],
+                                 "pipeline_steps": []})
+    llm.assert_not_called()
+    assert "ws/repo" in out["llm_response"] and "Sources I can search" in out["llm_response"]
+    off_topic = nodes.no_context_answer(["- Bitbucket repository: ws/repo (10 chunks)"], "capital of France?")
+    assert "won't guess" in off_topic
+    assert "Sources I can search" in nodes.no_context_answer(["- x"], "whats knowledge you have")
+    empty = nodes.no_context_answer([])
+    assert "nothing to search yet" in empty
+
+
+def test_knowledge_catalog_respects_selected_sources(registry, vectors, monkeypatch):
+    from src.graph.nodes import knowledge_catalog
+    import src.sources.registry as registry_module
+    import src.retrieval.vector_store as vector_module
+    add_repo(registry)
+    registry.update_source_status("bb-1", SourceStatus.READY, chunk_count=5)
+    add_repo(registry, source_id="bb-2")  # never indexed: not listed
+    monkeypatch.setattr(registry_module, "source_registry", registry)
+    monkeypatch.setattr(vector_module, "vector_store", vectors)
+    assert knowledge_catalog() == ["- Bitbucket repository: ws/repo (5 chunks)"]
+    assert knowledge_catalog(SourceFilter([], [])) == []
+
+
+def test_stream_answers_without_llm_when_nothing_is_retrieved(api, monkeypatch):
+    import json as _json
+    from src.retrieval.hybrid_retriever import hybrid_retriever
+    from src.gateway.llm_gateway import llm_gateway
+    from src.graph import nodes
+    monkeypatch.setattr(hybrid_retriever, "retrieve", lambda *a, **k: ([], []))
+    monkeypatch.setattr(nodes, "knowledge_catalog", lambda f=None: [])
+    called = []
+
+    async def fake_stream(*a, **k):
+        called.append(True)
+        yield "invented"
+    monkeypatch.setattr(llm_gateway, "astream", fake_stream)
+    body = api.post("/api/v1/query/stream", json={"question": "what knowledge do you have"}).text
+    events = [_json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+    assert not called
+    assert "nothing to search yet" in events[0]["token"]
+    assert events[-1]["sources"] == []

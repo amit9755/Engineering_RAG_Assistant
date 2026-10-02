@@ -24,9 +24,11 @@ try:
 
     print("2/2 Re-ranker: cross-encoder/ms-marco-MiniLM-L-6-v2 (~90 MB)")
     scores = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2").predict(
-        [("what is rag", "Retrieval-augmented generation answers from documents"),
-         ("what is rag", "The weather is sunny today")])
-    print(f"    OK - relevant {scores[0]:.1f} vs irrelevant {scores[1]:.1f}")
+        [("How do I reset my password?", "To reset your password, open Settings and click Reset password."),
+         ("How do I reset my password?", "The weather is sunny today.")])
+    if scores[0] <= scores[1]:
+        raise RuntimeError(f"re-ranker gives no signal (relevant {scores[0]:.1f}, irrelevant {scores[1]:.1f})")
+    print(f"    OK - relevant {scores[0]:.1f} vs irrelevant {scores[1]:.1f} (relevant must be higher)")
 
     print("\nBoth models are cached. Start the server:")
     print("  python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000")

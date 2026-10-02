@@ -193,7 +193,7 @@ async def query_stream_endpoint(
             # Retrieve context, then stream generation
             from starlette.concurrency import run_in_threadpool
             from src.retrieval.hybrid_retriever import hybrid_retriever
-            from src.graph.nodes import SYSTEM_PROMPT, format_context
+            from src.graph.nodes import build_messages, format_context, knowledge_catalog, no_context_answer
             from src.gateway.llm_gateway import llm_gateway
 
             true_chunks, noisy_chunks = await run_in_threadpool(
@@ -202,26 +202,29 @@ async def query_stream_endpoint(
                 source_filter=request.source_filter(),
             )
 
-            context = format_context([
-                {
-                    "content": c.document.page_content,
-                    "source": c.document.metadata.get("source_file", "unknown"),
-                    "source_type": c.document.metadata.get("source_type", "document"),
-                    "score": c.score,
-                }
-                for c in true_chunks
-            ]) or "No relevant information found in the selected sources."
+            source_filter = request.source_filter()
+            catalog = await run_in_threadpool(knowledge_catalog, source_filter)
 
-            messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
-            # The UI includes the current question as the last history item.
-            prior = history[:-1] if history and history[-1]["content"] == request.question else history
-            messages += prior[-4:]
-            messages.append({"role": "user", "content": guard_result.sanitized_text})
-
-            # Stream tokens
-            async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500):
-                event = json.dumps({"token": token, "done": False})
+            if not true_chunks:
+                # Nothing relevant retrieved: answer honestly instead of letting the
+                # model answer from general knowledge with invented citations.
+                event = json.dumps({"token": no_context_answer(catalog, request.question), "done": False})
                 yield f"data: {event}\n\n"
+            else:
+                context = format_context([
+                    {
+                        "content": c.document.page_content,
+                        "source": c.document.metadata.get("source_file", "unknown"),
+                        "source_type": c.document.metadata.get("source_type", "document"),
+                        "score": c.score,
+                    }
+                    for c in true_chunks
+                ])
+                messages = build_messages(guard_result.sanitized_text, context, catalog, history,
+                                          request.question)
+                async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500):
+                    event = json.dumps({"token": token, "done": False})
+                    yield f"data: {event}\n\n"
 
             # Send metadata after streaming completes
             sources = list(dict.fromkeys(
