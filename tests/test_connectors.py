@@ -500,3 +500,14 @@ def test_add_server_repository_from_pasted_url(api, registry, monkeypatch):
         SERVER, "WSQAAUTO", "wireless_centralized_server_gen2")
     assert api.post("/api/v1/sources/bitbucket", json={
         "server_url": "http://insecure", "workspace": "A", "repository": "b", "token": "t"}).status_code == 422
+
+
+def test_no_context_answer_points_out_unindexed_sources(registry, monkeypatch):
+    from src.graph import nodes
+    import src.sources.registry as registry_module
+    add_repo(registry)  # added, never indexed
+    monkeypatch.setattr(registry_module, "source_registry", registry)
+    assert nodes.unindexed_sources() == ["ws/repo"]
+    assert nodes.unindexed_sources(SourceFilter(["other"], [])) == []
+    answer = nodes.no_context_answer(["- Document: a.pdf (6 chunks)"], "what does this repo do?", ["ws/repo"])
+    assert "Not searchable yet:** ws/repo" in answer and "click **Index**" in answer

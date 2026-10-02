@@ -193,7 +193,8 @@ async def query_stream_endpoint(
             # Retrieve context, then stream generation
             from starlette.concurrency import run_in_threadpool
             from src.retrieval.hybrid_retriever import hybrid_retriever
-            from src.graph.nodes import build_messages, format_context, knowledge_catalog, no_context_answer
+            from src.graph.nodes import (build_messages, format_context, knowledge_catalog,
+                                         no_context_answer, unindexed_sources)
             from src.gateway.llm_gateway import llm_gateway
 
             true_chunks, noisy_chunks = await run_in_threadpool(
@@ -208,7 +209,8 @@ async def query_stream_endpoint(
             if not true_chunks:
                 # Nothing relevant retrieved: answer honestly instead of letting the
                 # model answer from general knowledge with invented citations.
-                event = json.dumps({"token": no_context_answer(catalog, request.question), "done": False})
+                event = json.dumps({"token": no_context_answer(
+                    catalog, request.question, unindexed_sources(source_filter)), "done": False})
                 yield f"data: {event}\n\n"
             else:
                 context = format_context([

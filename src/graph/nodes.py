@@ -222,8 +222,26 @@ _ABOUT_ASSISTANT = re.compile(
     r"about yourself|who are you)\b", re.I)
 
 
-def no_context_answer(catalog: List[str], query: str = "") -> str:
+def unindexed_sources(source_filter=None) -> List[str]:
+    """Selected repositories / projects / documents that have no searchable chunks yet."""
+    try:
+        from src.sources.registry import source_registry
+        return [src.name for src in source_registry.list_sources()
+                if not src.chunk_count and (source_filter is None or src.id in source_filter.source_ids)]
+    except Exception:
+        return []
+
+
+def no_context_answer(catalog: List[str], query: str = "", pending: List[str] = None) -> str:
     """Answer used instead of the LLM when retrieval found nothing, so nothing is invented."""
+    note = ""
+    if pending:
+        note = ("\n\n**Not searchable yet:** " + ", ".join(pending) + ". Open **Knowledge Sources**, "
+                "click **Index** on it, and wait for the green READY badge.")
+    return _no_context_answer(catalog, query) + note
+
+
+def _no_context_answer(catalog: List[str], query: str = "") -> str:
     if catalog and _ABOUT_ASSISTANT.search(query or ""):
         return ("I answer questions using only the knowledge sources you've connected, and I cite "
                 "the file, document, or Jira issue each answer comes from.\n\n"
@@ -400,7 +418,9 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
         # Nothing relevant was retrieved: a small model would answer from general
         # knowledge and invent citations, so answer honestly without calling it.
         steps.append("generation")
-        return {"llm_response": no_context_answer(catalog, state.get("original_query", "")), "model_used": "none (no matching sources)",
+        pending = unindexed_sources(state.get("source_filter"))
+        return {"llm_response": no_context_answer(catalog, state.get("original_query", ""), pending),
+                "model_used": "none (no matching sources)",
                 "pipeline_steps": steps}
 
     messages = build_messages(query, context, catalog, state.get("conversation_history", []),

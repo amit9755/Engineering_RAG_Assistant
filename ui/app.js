@@ -1158,11 +1158,13 @@ async function addBitbucketSource() {
     });
 
     if (res.ok) {
+      const source = await res.json();
       closeModal('modalBitbucket');
-      showToast(`Repository ${v.workspace}/${v.repository} added - click Index to make it searchable`, 'success');
       // Clear the token field immediately after success
       document.getElementById('bbToken').value = '';
-      await loadAllSources();
+      // Start indexing straight away: an added but unindexed repository has nothing to search.
+      showToast(`Repository ${v.workspace}/${v.repository} added - indexing started`, 'success');
+      await startSourceJob('bitbucket', source.id, 'index');
     } else {
       const err = await res.json();
       showToast(`Error: ${err.detail || 'Failed to add repository'}`, 'error');
@@ -1242,10 +1244,11 @@ async function addJiraSource() {
     });
 
     if (res.ok) {
+      const source = await res.json();
       closeModal('modalJira');
-      showToast(`Jira project ${projectKey} added`, 'success');
       document.getElementById('jiraToken').value = '';
-      await loadAllSources();
+      showToast(`Jira project ${projectKey} added - indexing started`, 'success');
+      await startSourceJob('jira', source.id, 'index');
     } else {
       const err = await res.json();
       showToast(`Error: ${err.detail || 'Failed to add project'}`, 'error');
