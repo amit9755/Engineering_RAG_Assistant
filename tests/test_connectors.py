@@ -443,6 +443,8 @@ class FakeServerSession:
                 {"id": "refs/heads/main-old", "displayId": "main-old", "latestCommit": "0" * 40}]},
         }
         if url == f"{api}/repos/app/archive":
+            if headers.get("Accept") == "application/json":
+                return response(406)  # what a real server does for a JSON-only Accept header
             r = response(200)
             r.iter_content = lambda size: [self.archive]
             return r

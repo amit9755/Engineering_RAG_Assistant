@@ -168,14 +168,14 @@ class BitbucketServerClient:
             url += f"/repos/{quote(repository, safe='')}"
         return url + suffix
 
-    def _get(self, url, **kwargs):
+    def _get(self, url, accept="application/json", **kwargs):
         timeout = kwargs.pop("timeout", 30)
         try:
-            response = self.http.get(url, headers={"Authorization": f"Bearer {self.token}",
-                                                   "Accept": "application/json"},
+            response = self.http.get(url, headers={"Authorization": f"Bearer {self.token}", "Accept": accept},
                                      timeout=timeout, **kwargs)
             if response.status_code == 401 and self.username:
-                response = self.http.get(url, auth=(self.username, self.token), timeout=timeout, **kwargs)
+                response = self.http.get(url, auth=(self.username, self.token), headers={"Accept": accept},
+                                         timeout=timeout, **kwargs)
         except requests.exceptions.SSLError as exc:
             raise IndexingError(f"SSL certificate check failed for {self.base}. On a company network, install "
                                 "pip-system-certs in the app's Python environment so it trusts the company "
@@ -230,7 +230,8 @@ class BitbucketServerClient:
 
     def download_archive(self, project, repository, commit) -> bytes:
         # prefix gives entries the same "<folder>/" layout as Bitbucket Cloud archives.
-        response = self._get(self._api(project, repository, "/archive"),
+        # The archive is binary: asking for JSON makes the server answer 406 Not Acceptable.
+        response = self._get(self._api(project, repository, "/archive"), accept="*/*",
                              params={"at": commit, "format": "zip", "prefix": f"{repository}/"},
                              stream=True, timeout=300)
         if response.status_code != 200:
