@@ -157,6 +157,28 @@ async def query_endpoint(
         raise HTTPException(status_code=500, detail=f"Internal error: {str(exc)}")
 
 
+class SuggestionsRequest(BaseModel):
+    question: str = Field(..., max_length=4000)
+    answer: str = Field(default="", max_length=20000)
+    sources: List[str] = Field(default_factory=list)
+    source_ids: Optional[List[str]] = None
+    legacy_files: Optional[List[str]] = None
+
+
+@router.post("/query/suggestions", summary="Suggest follow-up questions for an answer")
+async def suggestions_endpoint(request: SuggestionsRequest):
+    """Three follow-up questions grounded in the answer's sources (starter questions if it had none)."""
+    from starlette.concurrency import run_in_threadpool
+    from src.graph.nodes import knowledge_catalog, suggest_followups
+    from src.retrieval.source_filter import SourceFilter
+
+    source_filter = SourceFilter.from_request(request.source_ids, request.legacy_files)
+    catalog = await run_in_threadpool(knowledge_catalog, source_filter)
+    suggestions = await run_in_threadpool(suggest_followups, request.question, request.answer,
+                                          request.sources, catalog)
+    return {"suggestions": suggestions}
+
+
 @router.post("/query/stream", summary="Ask a question with streaming response")
 async def query_stream_endpoint(
     request: QueryRequest,

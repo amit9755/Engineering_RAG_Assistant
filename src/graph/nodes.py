@@ -307,6 +307,53 @@ def commit_list_answer(query: str, chunks: List[Dict]) -> str:
     return "\n\n".join(parts) + "\n\n(from the indexed commit history, newest first)"
 
 
+def default_suggestions(catalog: List[str]) -> List[str]:
+    """Starter questions that work for whatever kinds of sources are indexed."""
+    text = "\n".join(catalog)
+    suggestions = []
+    if "Bitbucket repository" in text:
+        suggestions += ["Explain this project", "What are the latest 5 commits?",
+                        "Which files handle configuration?"]
+    if "Jira project" in text:
+        suggestions.append("What are the most recent Jira issues?")
+    if "Document:" in text or "Older upload:" in text:
+        suggestions.append("Summarize the uploaded documents")
+    return suggestions[:3]
+
+
+def _clean_suggestion(line: str) -> str:
+    line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip().strip('"').strip()
+    return line if 8 <= len(line) <= 120 and line.endswith("?") else ""
+
+
+def suggest_followups(question: str, answer: str, sources: List[str], catalog: List[str]) -> List[str]:
+    """Three follow-up questions grounded in the answer and its source files."""
+    if not sources:
+        return default_suggestions(catalog)
+    from src.gateway.llm_gateway import llm_gateway
+    files = "\n".join(f"- {s}" for s in sources[:8])
+    messages = [
+        {"role": "system", "content": (
+            "Suggest exactly 3 short follow-up questions a developer could ask next. Each must be about "
+            "something mentioned in the answer or in the listed source files, be answerable from those "
+            "sources, and differ from the original question. Output one question per line, each ending "
+            "with '?', with no numbering and no other text.")},
+        {"role": "user", "content": f"Question: {question}\n\nAnswer:\n{answer[:3000]}\n\nSource files:\n{files}"},
+    ]
+    try:
+        raw = llm_gateway.complete(messages, temperature=0.3, max_tokens=150)
+    except Exception as exc:
+        logger.warning("suggestions_failed", error=str(exc)[:200])
+        return default_suggestions(catalog)
+    seen, out = {question.strip().lower()}, []
+    for line in raw.splitlines():
+        cleaned = _clean_suggestion(line)
+        if cleaned and cleaned.lower() not in seen:
+            seen.add(cleaned.lower())
+            out.append(cleaned)
+    return out[:3] or default_suggestions(catalog)
+
+
 def build_messages(query: str, context: str, catalog: List[str], history: List[Dict],
                    original_query: str) -> List[Dict]:
     """System prompt + last 2 turns + question. The UI sends the current question as the last history item."""

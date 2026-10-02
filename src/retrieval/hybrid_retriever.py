@@ -228,6 +228,25 @@ COMMIT_INTENT = re.compile(
     r"who (changed|pushed|modified)|last (change|push|update)s?)\b", re.I)
 
 
+# Broad questions ("explain this project", "give me an overview") rarely match a
+# specific chunk, so the cross-encoder rejects everything. They always get the
+# overview material of the selected sources instead (README / design docs / file
+# tree of a repository, the opening of a document).
+_OVERVIEW_STRONG = re.compile(
+    r"\b(overview|summar(y|ise|ize)|architecture|walk me through|high[- ]level|tell me about|introduc\w*|"
+    r"purpose of|what is this|what's this|whats this)\b", re.I)
+_OVERVIEW_WEAK = re.compile(r"\b(explain|describe|what (is|does)|what's|whats|how does)\b", re.I)
+_OVERVIEW_OBJECT = re.compile(r"\b(this|the|whole|entire) (project|repo|repository|code ?base|app|application|"
+                              r"system|product|service|software|tool|document)\b|\b(this|it)\b\W*$", re.I)
+
+
+def is_overview_question(text: str) -> bool:
+    text = (text or "").strip()
+    if _OVERVIEW_STRONG.search(text):
+        return True
+    return bool(_OVERVIEW_WEAK.search(text) and _OVERVIEW_OBJECT.search(text))
+
+
 def split_questions(text: str) -> List[str]:
     """Split a message into separate questions (one per line or per '?')."""
     import re
@@ -375,7 +394,16 @@ class HybridRetriever:
         true_data = [c for c in scored_chunks if c.is_true_data][:limit]
         noisy_data = [c for c in scored_chunks if not c.is_true_data]
 
-        # Step 6: commit questions always get the newest commit history
+        # Step 6: broad questions always get each source's overview material
+        if is_overview_question(query):
+            overview = self.vector_store.get_overview_chunks(source_filter)
+            keys = {_chunk_key(c.document) for c in true_data}
+            extra = [ScoredChunk(d, 1.0, True, "overview") for d in overview if _chunk_key(d) not in keys]
+            true_data = (true_data + extra)[:max(limit, 8)]
+            noisy_data = [c for c in noisy_data if _chunk_key(c.document) not in {_chunk_key(d) for d in overview}]
+            logger.info("overview_chunks_included", chunks=len(extra))
+
+        # Step 7: commit questions always get the newest commit history
         if COMMIT_INTENT.search(query):
             history = self.vector_store.get_commit_history(source_filter)
             keys = {_chunk_key(d) for d in history}

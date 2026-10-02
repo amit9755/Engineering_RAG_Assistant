@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=md-20261002" />
+  <link rel="stylesheet" href="/static/style.css?v=chats-20261002" />
 </head>
 <body>
 
@@ -151,8 +151,20 @@
 
       <!-- RIGHT PANEL: RAG Internals -->
       <aside class="sidebar-right" id="ragInternals">
+        <div class="right-tabs">
+          <button class="right-tab active" id="rtab-chats" onclick="switchRightTab('chats')">&#128172; Recent chats</button>
+          <button class="right-tab" id="rtab-internals" onclick="switchRightTab('internals')">&#128301; RAG internals</button>
+        </div>
+
+        <!-- Recent chats: the last 10 conversations, saved on the server -->
+        <div class="right-panel active" id="rpanel-chats">
+          <div class="chat-list" id="chatList">
+            <p class="source-hint">No saved chats yet. Your last 10 chats appear here.</p>
+          </div>
+        </div>
+
+        <div class="right-panel" id="rpanel-internals">
         <div class="panel-header">
-          <h3 class="sidebar-title">&#128301; RAG Internals</h3>
           <span class="panel-subtitle">See how the pipeline works</span>
         </div>
 
@@ -180,6 +192,7 @@
         <div class="internals-empty" id="internalsEmpty">
           <p>Ask a question to see<br/>the RAG pipeline in action</p>
         </div>
+        </div><!-- end rpanel-internals -->
       </aside>
 
     </div><!-- end panel-chat -->
@@ -443,6 +456,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=md-20261002"></script>
+<script src="/static/app.js?v=chats-20261002"></script>
 </body>
 </html>

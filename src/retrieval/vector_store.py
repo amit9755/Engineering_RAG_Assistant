@@ -252,6 +252,56 @@ class VectorStore:
                 if (meta or {}).get("chunk_index", 0) < chunks_per_source]
         return sorted(docs, key=lambda d: (d.metadata.get("source_id", ""), d.metadata.get("chunk_index", 0)))
 
+    OVERVIEW_DOC_HINTS = ("overview", "architecture", "design", "sdd", "intro", "getting-started",
+                          "getting_started", "claude.md", "agents.md", "about")
+
+    def get_overview_chunks(self, source_filter=None, per_source: int = 4) -> List[Document]:
+        """
+        Chunks that describe each selected source as a whole, for broad questions
+        like "explain this project": README and design docs and the file tree of a
+        repository, and the opening chunks of a document or older upload.
+        """
+        if settings.vector_store_type != "chroma":
+            return []
+        collection = self._store._collection
+        where = {"chunk_index": {"$lt": 2}}
+        if source_filter is not None:
+            if source_filter.is_empty:
+                return []
+            where = {"$and": [where, source_filter.chroma_where()]}
+        data = collection.get(where=where, include=["metadatas"])
+
+        def priority(meta):
+            path = (meta.get("file_path") or "").lower()
+            name = path.rsplit("/", 1)[-1]
+            depth = path.count("/")
+            if meta.get("source_type") == "bitbucket":
+                if name.startswith("readme"):
+                    return (0, depth, meta.get("chunk_index", 0))
+                if any(hint in path for hint in self.OVERVIEW_DOC_HINTS) and name.endswith((".md", ".rst", ".txt")):
+                    return (1, depth, meta.get("chunk_index", 0))
+                if path == "(file tree)" and meta.get("chunk_index", 0) == 0:
+                    return (2, 0, 0)
+                return None
+            if meta.get("source_type") == "jira":
+                return None
+            return (0, 0, meta.get("chunk_index", 0))  # documents and older uploads: their opening
+
+        groups = {}
+        for chunk_id, meta in zip(data["ids"], data["metadatas"]):
+            meta = meta or {}
+            rank = priority(meta)
+            if rank is not None:
+                key = meta.get("source_id") or meta.get("source_file")
+                groups.setdefault(key, []).append((rank, chunk_id))
+        chosen = [cid for items in groups.values() for _, cid in sorted(items)[:per_source]]
+        if not chosen:
+            return []
+        picked = collection.get(ids=chosen, include=["documents", "metadatas"])
+        order = {cid: i for i, cid in enumerate(chosen)}
+        docs = sorted(zip(picked["ids"], picked["documents"], picked["metadatas"]), key=lambda x: order[x[0]])
+        return [Document(page_content=text, metadata=meta) for _, text, meta in docs]
+
     # ----------------------------------------------------------
     # Legacy chunks: uploaded before the source registry existed,
     # so they have no source_id. Grouped by their source_file.

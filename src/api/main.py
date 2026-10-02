@@ -99,7 +99,7 @@ if os.path.exists(ui_path):
     app.mount("/static", StaticFiles(directory=ui_path), name="static")
 
 # Include routers
-from src.api.routes import query, ingest, health
+from src.api.routes import query, ingest, health, chats
 from src.api.routes.sources import documents as doc_sources
 from src.api.routes.sources import bitbucket as bb_sources
 from src.api.routes.sources import jira as jira_sources
@@ -112,6 +112,7 @@ app.include_router(doc_sources.router, prefix="/api/v1")
 app.include_router(bb_sources.router, prefix="/api/v1")
 app.include_router(jira_sources.router, prefix="/api/v1")
 app.include_router(source_progress.router, prefix="/api/v1")
+app.include_router(chats.router, prefix="/api/v1")
 
 
 @app.get("/", include_in_schema=False)

@@ -24,6 +24,8 @@ const state = {
   allSources: { documents: [], legacy: [], bitbucket: [], jira: [] },
   sourcePollTimer: null,
   progress: {},         // source id -> live indexing progress from /sources/progress
+  chatMessages: [],     // this chat's messages with sources, saved to /chats after each answer
+  msgCounter: 0,
   sourceStatuses: {},   // id -> last seen status, to announce finished indexing
   pendingDelete: null,  // { type, id, name }
   bbConnectionTested: false,
@@ -37,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
   checkServerHealth();
   loadKBStats();
   loadAllSources();
+  loadChatList();
   // Poll health every 30 seconds
   setInterval(checkServerHealth, 30000);
   setInterval(loadKBStats, 60000);
@@ -121,6 +124,8 @@ async function sendQuery() {
 
   // Update conversation history
   state.conversationHistory.push({ role: 'user', content: question });
+  state.chatMessages.push({ role: 'user', content: question, sources: [] });
+  document.querySelectorAll('.suggestions').forEach(el => el.remove());
 
   const useStreaming = document.getElementById('streamingMode').checked;
 
@@ -161,7 +166,7 @@ async function sendNormalQuery(question, sourceFilter) {
     state.lastResult = data;
 
     // Add assistant message
-    addMessage('assistant', data.answer, {
+    const msgId = addMessage('assistant', data.answer, {
       sources: data.sources,
       inputSafe: data.input_safe,
       outputSafe: data.output_safe,
@@ -174,6 +179,7 @@ async function sendNormalQuery(question, sourceFilter) {
 
     // Update conversation history with assistant response
     state.conversationHistory.push({ role: 'assistant', content: data.answer });
+    afterAnswer(msgId, question, data.answer, data.sources || [], sourceFilter);
 
   } catch (err) {
     removeTypingIndicator(typingId);
@@ -202,13 +208,15 @@ async function sendStreamingQuery(question, sourceFilter) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let fullResponse = '';
+    let pending = '';   // a long event can arrive split across network reads
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const text = decoder.decode(value, { stream: true });
-      const lines = text.split('\n');
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split('\n');
+      pending = lines.pop();   // keep the incomplete last line for the next read
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
@@ -229,6 +237,7 @@ async function sendStreamingQuery(question, sourceFilter) {
             // Add sources to the message
             addSourcesToMessage(msgId, event.sources || []);
             state.conversationHistory.push({ role: 'assistant', content: fullResponse });
+            afterAnswer(msgId, question, fullResponse, event.sources || [], sourceFilter);
           }
         } catch { /* malformed event, skip */ }
       }
@@ -237,6 +246,144 @@ async function sendStreamingQuery(question, sourceFilter) {
     updateStreamingMessage(msgId, `Connection error: ${err.message}`);
   } finally {
     setLoading(false);
+  }
+}
+
+// ============================================================
+// AFTER EACH ANSWER: save the chat, then suggest follow-up questions
+// ============================================================
+
+function afterAnswer(msgId, question, answer, sources, sourceFilter) {
+  state.chatMessages.push({ role: 'assistant', content: answer, sources });
+  saveCurrentChat();
+  loadSuggestions(msgId, question, answer, sources, sourceFilter);
+}
+
+async function loadSuggestions(msgId, question, answer, sources, sourceFilter) {
+  const msg = document.getElementById(msgId);
+  if (!msg) return;
+  const box = document.createElement('div');
+  box.className = 'suggestions';
+  box.innerHTML = '<span class="suggestions-label"><span class="spinner"></span> Thinking of follow-up questions...</span>';
+  msg.querySelector('.message-content').appendChild(box);
+  try {
+    const res = await fetch(`${API_BASE}/query/suggestions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, answer, sources, ...(sourceFilter || {}) }),
+    });
+    const data = res.ok ? await res.json() : { suggestions: [] };
+    if (!data.suggestions.length) { box.remove(); return; }
+    box.innerHTML = '<span class="suggestions-label">You could also ask:</span>' +
+      data.suggestions.map(q => `<button class="suggestion-chip">${escapeHtml(q)}</button>`).join('');
+    box.querySelectorAll('.suggestion-chip').forEach((chip, i) => {
+      chip.addEventListener('click', () => {
+        if (state.isLoading) return;
+        const input = document.getElementById('queryInput');
+        input.value = data.suggestions[i];
+        sendQuery();
+      });
+    });
+    scrollToBottom();
+  } catch {
+    box.remove();
+  }
+}
+
+// ============================================================
+// SAVED CHATS (right panel): the server keeps the last 10
+// ============================================================
+
+function switchRightTab(tab) {
+  ['chats', 'internals'].forEach(name => {
+    document.getElementById(`rtab-${name}`).classList.toggle('active', name === tab);
+    document.getElementById(`rpanel-${name}`).classList.toggle('active', name === tab);
+  });
+}
+
+async function saveCurrentChat() {
+  if (!state.chatMessages.length) return;
+  try {
+    await fetch(`${API_BASE}/chats/${encodeURIComponent(state.sessionId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: state.chatMessages }),
+    });
+    await loadChatList();
+  } catch { /* saving is best effort; the chat itself still works */ }
+}
+
+async function loadChatList() {
+  try {
+    const res = await fetch(`${API_BASE}/chats`);
+    state.chats = res.ok ? await res.json() : [];
+  } catch {
+    state.chats = [];
+  }
+  renderChatList();
+}
+
+function formatWhen(iso) {
+  const date = new Date(iso);
+  const minutes = Math.round((Date.now() - date) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} h ago`;
+  return date.toLocaleDateString();
+}
+
+function renderChatList() {
+  const container = document.getElementById('chatList');
+  const chats = state.chats || [];
+  if (!chats.length) {
+    container.innerHTML = '<p class="source-hint">No saved chats yet. Your last 10 chats appear here.</p>';
+    return;
+  }
+  container.innerHTML = chats.map(chat => `
+    <div class="chat-item ${chat.id === state.sessionId ? 'active' : ''}" data-chat="${escapeHtml(chat.id)}">
+      <div class="chat-item-text">
+        <div class="chat-item-title">${escapeHtml(chat.title)}</div>
+        <div class="chat-item-meta">${formatWhen(chat.updated_at)} &middot; ${chat.message_count} messages</div>
+      </div>
+      <button class="chat-item-delete" data-delete-chat="${escapeHtml(chat.id)}" title="Delete chat">&times;</button>
+    </div>`).join('');
+  container.querySelectorAll('.chat-item').forEach(item => {
+    item.addEventListener('click', () => openChat(item.dataset.chat));
+  });
+  container.querySelectorAll('[data-delete-chat]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      deleteChat(button.dataset.deleteChat);
+    });
+  });
+}
+
+async function openChat(chatId) {
+  if (state.isLoading || chatId === state.sessionId) return;
+  try {
+    const res = await fetch(`${API_BASE}/chats/${encodeURIComponent(chatId)}`);
+    if (!res.ok) throw new Error('Chat not found');
+    const chat = await res.json();
+    document.getElementById('messagesContainer').innerHTML = '';
+    document.getElementById('welcomeMessage').style.display = 'none';
+    chat.messages.forEach(m => addMessage(m.role, m.content, { sources: m.sources }));
+    state.sessionId = chat.id;
+    state.chatMessages = chat.messages;
+    state.conversationHistory = chat.messages.map(m => ({ role: m.role, content: m.content }));
+    document.getElementById('sessionInfo').textContent = 'Session: ' + state.sessionId.slice(-8);
+    renderChatList();
+  } catch (err) {
+    showToast(err.message, 'error');
+    loadChatList();
+  }
+}
+
+async function deleteChat(chatId) {
+  try {
+    await fetch(`${API_BASE}/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+  } finally {
+    if (chatId === state.sessionId) newChat();
+    loadChatList();
   }
 }
 
@@ -250,7 +397,7 @@ async function sendStreamingQuery(question, sourceFilter) {
 
 function addMessage(role, content, meta = {}) {
   const container = document.getElementById('messagesContainer');
-  const id = 'msg-' + Date.now();
+  const id = `msg-${Date.now()}-${++state.msgCounter}`;
   const avatar = role === 'user' ? '&#128100;' : '&#129302;';
   const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -317,7 +464,7 @@ function removeTypingIndicator(id) {
 
 function addStreamingMessage() {
   const container = document.getElementById('messagesContainer');
-  const id = 'stream-' + Date.now();
+  const id = `stream-${Date.now()}-${++state.msgCounter}`;
   const div = document.createElement('div');
   div.className = 'message assistant';
   div.id = id;
@@ -578,6 +725,7 @@ function newChat() {
   document.getElementById('messagesContainer').innerHTML = '';
   document.getElementById('welcomeMessage').style.display = 'flex';
   state.conversationHistory = [];
+  state.chatMessages = [];
   state.sessionId = generateSessionId();
   document.getElementById('sessionInfo').textContent = 'Session: ' + state.sessionId.slice(-8);
   // Reset internals panel
@@ -585,6 +733,7 @@ function newChat() {
     document.getElementById(id).style.display = 'none';
   });
   document.getElementById('internalsEmpty').style.display = 'flex';
+  renderChatList();
   document.getElementById('queryInput').focus();
 }
 

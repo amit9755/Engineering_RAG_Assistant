@@ -1019,3 +1019,38 @@ body {
 .md-table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
 .md-table th, .md-table td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; vertical-align: top; }
 .md-table th { background: var(--bg-hover); font-weight: 600; }
+
+/* ===== Right panel tabs: Recent chats / RAG internals ===== */
+.right-tabs { display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid var(--border); }
+.right-tab {
+  flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 8px 6px; font-size: 12.5px; font-weight: 600; color: var(--text-secondary); cursor: pointer;
+}
+.right-tab:hover { color: var(--text-primary); }
+.right-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.right-panel { display: none; }
+.right-panel.active { display: block; }
+.chat-list { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.chat-item {
+  display: flex; align-items: flex-start; gap: 6px; padding: 9px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-card); cursor: pointer;
+}
+.chat-item:hover { border-color: var(--accent); }
+.chat-item.active { border-color: var(--accent); background: var(--accent-light); }
+.chat-item-text { flex: 1; min-width: 0; }
+.chat-item-title { font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.chat-item-delete {
+  background: none; border: none; color: var(--text-muted); font-size: 16px; line-height: 1;
+  cursor: pointer; padding: 0 2px;
+}
+.chat-item-delete:hover { color: var(--accent-red); }
+
+/* ===== Follow-up question suggestions ===== */
+.suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.suggestions-label { font-size: 11.5px; color: var(--text-muted); margin-right: 2px; }
+.suggestion-chip {
+  border: 1px solid var(--accent); background: var(--accent-light); color: var(--accent);
+  border-radius: 16px; padding: 4px 11px; font-size: 12.5px; cursor: pointer; text-align: left;
+}
+.suggestion-chip:hover { background: var(--accent); color: #fff; }
