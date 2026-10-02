@@ -117,6 +117,7 @@ class BitbucketClient:
         return f"{base}/src/{commit}/{path}" if path else base
 
     def _get(self, url, **kwargs):
+        _check_network(url)
         try:
             response = self.http.get(url, auth=self.auth, timeout=kwargs.pop("timeout", 30), **kwargs)
         except requests.RequestException as exc:
@@ -186,6 +187,7 @@ class BitbucketServerClient:
         return url + suffix
 
     def _get(self, url, accept="application/json", **kwargs):
+        _check_network(url)
         timeout = kwargs.pop("timeout", 30)
         try:
             response = self.http.get(url, headers={"Authorization": f"Bearer {self.token}", "Accept": accept},
@@ -281,6 +283,14 @@ class BitbucketServerClient:
     def file_url(self, project, repository, commit, path=None):
         base = f"{self.base}/projects/{project}/repos/{repository}/browse"
         return f"{base}/{path}?at={commit}" if path else base
+
+
+def _check_network(url):
+    from src import network_policy
+    try:
+        network_policy.check_url(url, "a Bitbucket request")
+    except network_policy.ExternalNetworkBlocked as exc:
+        raise IndexingError(str(exc)) from exc
 
 
 def _read_limited(response, on_progress=None) -> bytes:

@@ -85,13 +85,13 @@ def test_reindex_failure_preserves_old_vectors_and_retry_clears_error(service):
     source = service.upload(b"Original text", "notes.txt")
     collection = service.vectors._store._collection
     before = collection.get(where={"source_id": source.id})
-    real_add = service.vectors._store.add_documents
+    real_add = collection.add
 
-    def partial_failure(documents, ids):
-        real_add(documents[:1], ids=ids[:1])
+    def partial_failure(ids, documents, metadatas, embeddings):
+        real_add(ids=ids[:1], documents=documents[:1], metadatas=metadatas[:1], embeddings=embeddings[:1])
         raise RuntimeError("Simulated write failure")
 
-    with patch.object(service.vectors._store, "add_documents", side_effect=partial_failure):
+    with patch.object(type(collection), "add", side_effect=partial_failure):
         with pytest.raises(RuntimeError):
             service.reindex(source.id)
     assert collection.get(where={"source_id": source.id})["ids"] == before["ids"]

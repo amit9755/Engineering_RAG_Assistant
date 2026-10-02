@@ -64,6 +64,11 @@ async def test_jira_connection(request: TestJiraRequest):
     Phase 1: Basic HTTP test against Jira REST API.
     Phase 6: Returns full project list for dynamic dropdown.
     """
+    from src import network_policy
+    try:
+        network_policy.check_url(request.base_url, "the Jira connection test")
+    except network_policy.ExternalNetworkBlocked as exc:
+        return TestConnectionResponse(success=False, message=str(exc))
     try:
         import requests as http_requests
         from requests.auth import HTTPBasicAuth

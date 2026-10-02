@@ -166,7 +166,7 @@ class AddBitbucketSourceRequest(BaseModel):
 
 
 class TestBitbucketRequest(BaseModel):
-    workspace: str
+    workspace: str = ""          # may come from a pasted Bitbucket Server repository link
     username: str = ""
     token: str
     server_url: Optional[str] = None

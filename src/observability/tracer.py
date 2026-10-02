@@ -34,6 +34,11 @@ class RAGTracer:
 
     def _init_langfuse(self) -> None:
         """Initialize LangFuse client if credentials are configured."""
+        from src import network_policy
+        if (settings.langfuse_public_key and not network_policy.external_allowed()
+                and not network_policy.is_internal_url(settings.langfuse_host)):
+            logger.info("langfuse_disabled", reason="external calls are disabled")
+            return
         if settings.langfuse_public_key and settings.langfuse_secret_key:
             try:
                 from langfuse import Langfuse

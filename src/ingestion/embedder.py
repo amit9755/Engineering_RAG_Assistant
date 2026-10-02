@@ -17,6 +17,7 @@
 #       needs GCP credentials, costs money
 # ============================================================
 
+import os
 from typing import List
 from src.config import settings
 from src.observability.logger import get_logger
@@ -59,6 +60,15 @@ class EmbeddingModel:
                 from langchain_huggingface import HuggingFaceEmbeddings
             except ImportError:
                 from langchain_community.embeddings import HuggingFaceEmbeddings
+            # Embedding is CPU-bound during indexing: use all cores but one (PyTorch
+            # often defaults to fewer), leaving one free so the app stays responsive.
+            try:
+                import torch
+                threads = int(os.environ.get("EMBEDDING_THREADS", "0")) or max(1, (os.cpu_count() or 2) - 1)
+                torch.set_num_threads(threads)
+                logger.info("embedding_threads", threads=threads)
+            except Exception as exc:
+                logger.warning("embedding_threads_not_set", error=str(exc))
             self._model = HuggingFaceEmbeddings(
                 model_name=model_name,
                 model_kwargs={"device": "cpu"},  # use "cuda" if GPU available

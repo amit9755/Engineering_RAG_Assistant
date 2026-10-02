@@ -184,16 +184,46 @@ class VectorStore:
             raise ValueError("Document contains no extractable text")
         if any(doc.metadata.get("source_id") != source_id for doc in documents):
             raise ValueError("All replacement chunks must belong to the same source")
+        import hashlib
+
         collection = self._store._collection
-        old_ids = collection.get(where={"source_id": source_id}, include=[])["ids"]
+        # Re-indexing mostly sees unchanged text: reuse the stored vector of any chunk
+        # whose text is identical (same content hash) instead of embedding it again.
+        existing = collection.get(where={"source_id": source_id}, include=["metadatas", "embeddings"])
+        old_ids = existing["ids"]
+        cached = {}
+        for meta, vector in zip(existing.get("metadatas") or [], existing.get("embeddings")
+                                if existing.get("embeddings") is not None else []):
+            if meta and meta.get("content_hash"):
+                cached[meta["content_hash"]] = [float(x) for x in vector]
+        model = settings.embedding_model
+        for doc in documents:
+            doc.metadata["content_hash"] = hashlib.sha1(
+                f"{model}\n{doc.page_content}".encode("utf-8")).hexdigest()
+
         new_ids = [str(uuid.uuid4()) for _ in documents]
+        total = len(documents)
+        reused = sum(1 for d in documents if d.metadata["content_hash"] in cached)
+        logger.info("embedding_cache", source_id=source_id, chunks=total, reused=reused, to_embed=total - reused)
+        done = reused
+        if on_progress:
+            on_progress(done, total)
         try:
             # Chroma rejects oversized batches, and repositories can produce thousands of chunks.
-            for start in range(0, len(documents), self.ADD_BATCH_SIZE):
-                end = start + self.ADD_BATCH_SIZE
-                self._store.add_documents(documents[start:end], ids=new_ids[start:end])
-                if on_progress:
-                    on_progress(min(end, len(documents)), len(documents))
+            for start in range(0, total, self.ADD_BATCH_SIZE):
+                batch = documents[start:start + self.ADD_BATCH_SIZE]
+                ids = new_ids[start:start + self.ADD_BATCH_SIZE]
+                missing = [d for d in batch if d.metadata["content_hash"] not in cached]
+                if missing:
+                    vectors = self._store.embeddings.embed_documents([d.page_content for d in missing])
+                    for doc, vector in zip(missing, vectors):
+                        cached[doc.metadata["content_hash"]] = vector
+                collection.add(ids=ids, documents=[d.page_content for d in batch],
+                               metadatas=[d.metadata for d in batch],
+                               embeddings=[cached[d.metadata["content_hash"]] for d in batch])
+                done += len(missing)
+                if on_progress and missing:
+                    on_progress(done, total)
             if old_ids:
                 collection.delete(ids=old_ids)
         except Exception:

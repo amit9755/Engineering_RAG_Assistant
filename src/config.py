@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     )
 
     # --- GCP ---
+    # --- Network policy ---
+    # false = never contact anything outside the company network: only hosts under
+    # INTERNAL_DOMAINS, localhost and private IP addresses (cloud LLMs, Hugging Face,
+    # GitHub, telemetry and cloud Bitbucket / Jira are all blocked).
+    allow_external_network: bool = Field(default=True, description="Allow calls outside the company network")
+    internal_domains: str = Field(default="nxp.com", description="Comma-separated domains treated as internal")
+
     gcp_project_id: str = Field(default="local-dev", description="GCP Project ID")
     gcp_region: str = Field(default="us-central1", description="GCP Region")
     gcp_bucket_name: str = Field(default="rag-documents", description="GCS Bucket for documents")

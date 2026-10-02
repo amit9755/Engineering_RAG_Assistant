@@ -103,6 +103,11 @@ class JiraClient:
         self.http = session or requests.Session()
 
     def _get(self, path, params):
+        from src import network_policy
+        try:
+            network_policy.check_url(self.base_url, "a Jira request")
+        except network_policy.ExternalNetworkBlocked as exc:
+            raise IndexingError(str(exc)) from exc
         try:
             response = self.http.get(f"{self.base_url}{path}", params=params, auth=self.auth,
                                      headers={"Accept": "application/json"}, timeout=60)

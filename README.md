@@ -188,6 +188,24 @@ and Markdown up to 50 MB each. Legacy `.doc` files should be saved as `.docx`.
 Files uploaded before document management appear under **Older uploads** with a
 text preview; they stay searchable and can be removed, but not reindexed.
 
+### Network policy (company networks)
+
+Set `ALLOW_EXTERNAL_NETWORK=false` in `.env` to keep every call inside the
+company network. Only hosts under `INTERNAL_DOMAINS` (default `nxp.com`, e.g.
+`bitbucket.sw.nxp.com`), `localhost` (Ollama) and private IP addresses can be
+contacted. Cloud LLMs, Hugging Face downloads, LiteLLM's price-list fetch,
+Chroma / LiteLLM telemetry, Langfuse cloud, spaCy model downloads, Google Cloud
+Storage, bitbucket.org and Jira Cloud are blocked with a clear error, and only
+the local Ollama model is used even if API keys are set. Run
+`download_model.py` while external access is still allowed, then switch it off.
+
+### Indexing speed
+
+Each chunk stores a hash of its text; re-indexing and Sync reuse the stored
+vector of every unchanged chunk, so only changed files are embedded again (the
+first index of a repository still embeds everything). Embedding uses all CPU
+cores but one (`EMBEDDING_THREADS`). Several sources can index at the same time.
+
 ### Bitbucket and Jira
 
 Add a repository (**Knowledge Sources → Bitbucket**) or project (**→ Jira**),

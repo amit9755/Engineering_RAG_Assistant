@@ -87,6 +87,13 @@ class PIIDetector:
         try:
             from presidio_analyzer import AnalyzerEngine
             from presidio_anonymizer import AnonymizerEngine
+            from src import network_policy
+            if not network_policy.external_allowed():
+                import spacy.util
+                if not spacy.util.is_package("en_core_web_lg"):
+                    logger.warning("presidio_disabled", reason="spaCy model en_core_web_lg is not installed "
+                                   "and external downloads are disabled")
+                    return
             self._analyzer = AnalyzerEngine()
             self._anonymizer = AnonymizerEngine()
             logger.info("presidio_pii_detector_loaded")

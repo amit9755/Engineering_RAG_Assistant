@@ -107,6 +107,17 @@ class LLMGateway:
         openai_key = (settings.openai_api_key or "").strip()
         ollama_model = os.environ.get("OLLAMA_MODEL", env_vals.get("OLLAMA_MODEL", "")).strip()
 
+        from src import network_policy
+        if not network_policy.external_allowed():
+            # Cloud providers are outside the company network: only a local / internal Ollama.
+            api_base = os.environ.get("OLLAMA_API_BASE", env_vals.get("OLLAMA_API_BASE", "")) or "http://localhost:11434"
+            network_policy.check_url(api_base, "the Ollama model server")
+            if not ollama_model:
+                raise network_policy.ExternalNetworkBlocked(
+                    "External calls are disabled (ALLOW_EXTERNAL_NETWORK=false), so only a local model can be "
+                    "used. Set OLLAMA_MODEL (e.g. llama3.2) in .env.")
+            return f"ollama/{ollama_model}"
+
         if gemini_key:
             # Free Google AI Studio - get key at https://aistudio.google.com/apikey
             os.environ["GEMINI_API_KEY"] = gemini_key

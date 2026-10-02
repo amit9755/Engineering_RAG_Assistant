@@ -24,6 +24,9 @@ import os
 
 from src.observability.logger import configure_logging, get_logger
 from src.config import settings
+from src import network_policy
+
+network_policy.apply()  # before any library that may call the internet is imported
 
 # Configure structured logging before anything else
 configure_logging()

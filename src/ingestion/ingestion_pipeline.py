@@ -89,6 +89,10 @@ class IngestionPipeline:
             a new file is uploaded to the bucket.
         """
         from src.config import settings
+        from src import network_policy
+        if not network_policy.external_allowed():
+            return {"status": "error", "message": "Google Cloud Storage is outside the company network; "
+                                                  "external calls are disabled (ALLOW_EXTERNAL_NETWORK=false)."}
         try:
             from google.cloud import storage
 
