@@ -69,6 +69,9 @@ class FakeBitbucket:
     def get_repository(self, workspace, repository):
         return {"mainbranch": {"name": self.default}}
 
+    def get_commits(self, workspace, repository, commit, limit=200):
+        return [{"id": commit, "author": "Amit", "date": "2026-10-01", "message": "latest change"}]
+
     def download_archive(self, workspace, repository, commit, on_progress=None):
         self.downloads += 1
         return repo_zip(self.files)
@@ -157,7 +160,7 @@ def test_bitbucket_index_replaces_chunks_and_sync_skips_unchanged_commit(registr
     jobs = IndexJobRunner(registry)
     jobs.start("bb-1", indexer.index, background=False)
     source, cfg = registry.get_source("bb-1"), registry.get_bitbucket_config("bb-1")
-    assert source.status == SourceStatus.READY and source.chunk_count == 2
+    assert source.status == SourceStatus.READY and source.chunk_count == 3  # file, file tree, commit history
     assert cfg.last_commit == "c" * 40 and cfg.file_count == 1
 
     jobs.start("bb-1", indexer.sync, background=False)
@@ -167,7 +170,7 @@ def test_bitbucket_index_replaces_chunks_and_sync_skips_unchanged_commit(registr
     fake.files = {"src/app.py": "print('v2')\n", "src/util.py": "x = 1\n"}
     jobs.start("bb-1", indexer.sync, background=False)
     texts = vectors._store._collection.get()["documents"]
-    assert fake.downloads == 2 and len(texts) == 3
+    assert fake.downloads == 2 and len(texts) == 4  # 2 files, file tree, commit history
     assert not any("v1" in t for t in texts)
 
 
@@ -189,7 +192,7 @@ def test_failed_index_keeps_previous_chunks_and_reports_error(registry, vectors)
     source = registry.get_source("bb-1")
     assert source.status == SourceStatus.ERROR
     assert "No readable source files" in source.error_message
-    assert vectors._store._collection.count() == 2
+    assert vectors._store._collection.count() == 3
 
 
 def test_job_runner_rejects_concurrent_jobs_and_recovers_after_restart(registry):
@@ -584,3 +587,26 @@ def test_last_n_commits_is_answered_exactly_from_history():
     assert commit_list_answer("show the latest commits", [history]).count("`h0") == 8
     assert commit_list_answer("who made the last commit and why?", [history]) is None
     assert commit_list_answer("last 5 commits", [{"source": "a.py", "content": "x"}]) is None
+
+
+def test_old_index_without_commit_history_is_reindexed_by_sync_and_explained(registry, vectors, monkeypatch):
+    add_repo(registry)
+    fake = FakeBitbucket({"src/app.py": "print('v1')\n"})
+    fake.get_commits = Mock(side_effect=RuntimeError("history API unavailable"))  # like an index made before history
+    indexer = BitbucketIndexer(registry=registry, credentials=FakeCredentials(), vector_store=vectors,
+                               refresh=Mock(), client_factory=fake)
+    jobs = IndexJobRunner(registry)
+    jobs.start("bb-1", indexer.index, background=False)
+    assert not vectors.has_commit_history("bb-1")
+    jobs.start("bb-1", indexer.sync, background=False)
+    assert fake.downloads == 2  # same commit, but history missing: full index again
+
+    from src.graph import nodes
+    import src.sources.registry as registry_module
+    import src.retrieval.vector_store as vector_module
+    monkeypatch.setattr(registry_module, "source_registry", registry)
+    monkeypatch.setattr(vector_module, "vector_store", vectors)
+    assert nodes.missing_commit_history("tell last 5 commit") == ["ws/repo"]
+    assert nodes.missing_commit_history("explain this project") == []
+    answer = nodes.no_context_answer([], "tell last 5 commit", None, ["ws/repo"])
+    assert "Commit history hasn't been indexed yet for: ws/repo" in answer and "Reindex" in answer

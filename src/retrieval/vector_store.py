@@ -237,6 +237,14 @@ class VectorStore:
         all_results = self.similarity_search(query, k=k * 3)
         return [doc for doc in all_results if source_filter.matches(doc.metadata)][:k]
 
+    def has_commit_history(self, source_id: str) -> bool:
+        """True if the repository's commit history has been indexed (older indexes lack it)."""
+        if settings.vector_store_type != "chroma":
+            return False
+        found = self._store._collection.get(
+            where={"$and": [{"source_id": source_id}, {"file_path": "(commit history)"}]}, limit=1, include=[])
+        return bool(found["ids"])
+
     def get_commit_history(self, source_filter=None, chunks_per_source: int = 2) -> List[Document]:
         """Newest commit-history chunks of each (selected) repository, newest first."""
         if settings.vector_store_type != "chroma":

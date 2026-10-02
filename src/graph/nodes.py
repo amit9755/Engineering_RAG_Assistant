@@ -232,8 +232,30 @@ def unindexed_sources(source_filter=None) -> List[str]:
         return []
 
 
-def no_context_answer(catalog: List[str], query: str = "", pending: List[str] = None) -> str:
+def missing_commit_history(query: str, source_filter=None) -> List[str]:
+    """Selected, indexed repositories that have no commit history yet (for commit questions)."""
+    from src.retrieval.hybrid_retriever import COMMIT_INTENT
+    if not COMMIT_INTENT.search(query or ""):
+        return []
+    try:
+        from src.sources.registry import source_registry
+        from src.retrieval.vector_store import vector_store
+        return [src.name for src in source_registry.list_sources()
+                if src.type.value == "bitbucket" and src.chunk_count
+                and (source_filter is None or src.id in source_filter.source_ids)
+                and not vector_store.has_commit_history(src.id)]
+    except Exception:
+        return []
+
+
+def no_context_answer(catalog: List[str], query: str = "", pending: List[str] = None,
+                      no_history: List[str] = None) -> str:
     """Answer used instead of the LLM when retrieval found nothing, so nothing is invented."""
+    if no_history:
+        return ("Commit history hasn't been indexed yet for: " + ", ".join(no_history) + ".\n\n"
+                "It was indexed before commit history was supported. Open **Knowledge Sources > Bitbucket** "
+                "and click **Reindex** (or **Sync**) on the repository, wait for the green READY badge, "
+                "then ask again.")
     note = ""
     if pending:
         note = ("\n\n**Not searchable yet:** " + ", ".join(pending) + ". Open **Knowledge Sources**, "
@@ -514,7 +536,8 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
         # knowledge and invent citations, so answer honestly without calling it.
         steps.append("generation")
         pending = unindexed_sources(state.get("source_filter"))
-        return {"llm_response": no_context_answer(catalog, state.get("original_query", ""), pending),
+        no_history = missing_commit_history(state.get("original_query", ""), state.get("source_filter"))
+        return {"llm_response": no_context_answer(catalog, state.get("original_query", ""), pending, no_history),
                 "model_used": "none (no matching sources)",
                 "pipeline_steps": steps}
 

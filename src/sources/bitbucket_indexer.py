@@ -473,7 +473,9 @@ class BitbucketIndexer:
             raise IndexingError("Bitbucket source not found.")
         report_progress(source_id, "Checking for new commits")
         branch, commit = resolve_branch(self._client(cfg), cfg)
-        if commit == cfg.last_commit and branch == cfg.branch and source.chunk_count:
+        # Repositories indexed before commit history existed get a full index once.
+        if (commit == cfg.last_commit and branch == cfg.branch and source.chunk_count
+                and self.vectors.has_commit_history(source_id)):
             logger.info("bitbucket_sync_up_to_date", source_id=source_id, commit=commit[:12])
             return source.chunk_count
         return self.index(source_id)
