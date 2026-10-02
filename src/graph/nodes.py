@@ -456,6 +456,80 @@ def build_vision_messages(question: str, context: str, catalog: List[str], histo
     return messages
 
 
+# "write / implement / fix / refactor / add tests ..." -> code suggestion mode.
+CODE_INTENT = re.compile(
+    r"\b(?:suggest|give me|show me|write|generate|create|implement|add|fix|refactor|rewrite|modify|change|update|"
+    r"optimi[sz]e|convert|extend)\b.{0,60}?\b(?:code|function|method|class|tests?|unit tests?|endpoint|api|"
+    r"component|script|query|handler|validation|logic|feature|retry|hook|service|controller|migration|snippet|"
+    r"implementation)\b"
+    r"|\bhow (?:do|would|can|should) i (?:implement|write|code|add|build|fix)\b"
+    r"|\b(?:code|snippet|example) (?:for|to|that)\b", re.I | re.S)
+
+CODE_PROMPT = """You are a senior software engineer pairing with the user on THEIR codebase. Write the code
+they ask for so it fits this repository.
+
+How to answer:
+- Base the code on the repository context below: reuse its existing functions, types, libraries,
+  naming, error handling and test style. Name the file(s) to change and where (function / class).
+- Show code in fenced blocks with the language, e.g. ```ts. For a change to an existing function,
+  show the whole updated function; for new code, show where it goes.
+- Briefly explain the change and list any assumptions. Add a test when it is natural.
+- If the context does not show something you need (a type, a helper, a config value), say so and
+  mark that part of the code as an assumption instead of presenting it as existing code.
+- This is a suggestion: never claim it has been applied or committed.
+
+Knowledge sources the user selected:
+{catalog}
+
+Repository context (numbered):
+{context}"""
+
+
+CODE_MODEL_HINT = ("\n\n_Written with the general model because the code model is not installed. For better "
+                   "code run `ollama pull qwen2.5-coder:7b` (or set OLLAMA_CODE_MODEL)._")
+
+
+def is_code_request(question: str) -> bool:
+    return bool(CODE_INTENT.search(question or ""))
+
+
+def code_context_chunks(chunks: List[Dict], files: int = 3, per_file: int = 8) -> List[Dict]:
+    """
+    The retrieved chunks, with the best-matching code files expanded to consecutive
+    chunks, so the model sees whole functions and the file's conventions.
+    """
+    from src.retrieval.vector_store import vector_store
+    out, seen_files = [], []
+    for chunk in chunks:
+        meta = chunk.get("metadata") or {}
+        if (chunk.get("source_type") == "bitbucket" and meta.get("file_path")
+                and not meta["file_path"].startswith("(") and len(seen_files) < files
+                and (meta.get("source_id"), meta["file_path"]) not in seen_files):
+            seen_files.append((meta.get("source_id"), meta["file_path"]))
+            try:
+                for doc in vector_store.get_file_chunks(meta.get("source_id"), meta["file_path"],
+                                                        meta.get("chunk_index", 0), per_file):
+                    out.append({"content": doc.page_content, "source": doc.metadata.get("source_file", ""),
+                                "source_type": "bitbucket", "score": chunk.get("score", 1.0)})
+                continue
+            except Exception as exc:
+                logger.warning("code_context_expand_failed", error=str(exc)[:120])
+        if not any(c["content"] == chunk.get("content") for c in out):
+            out.append(chunk)
+    return out
+
+
+def build_code_messages(question: str, chunks: List[Dict], catalog: List[str], history: List[Dict]) -> List[Dict]:
+    context = format_context(code_context_chunks(chunks)) or "(no matching repository code was found)"
+    messages = [{"role": "system", "content": CODE_PROMPT.format(context=context,
+                                                                 catalog="\n".join(catalog) or "(none)")}]
+    if history and history[-1].get("content") == question:
+        history = history[:-1]
+    messages += [{"role": m["role"], "content": m["content"]} for m in history[-4:]]
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
 def build_messages(query: str, context: str, catalog: List[str], history: List[Dict],
                    original_query: str) -> List[Dict]:
     """System prompt + last 2 turns + question. The UI sends the current question as the last history item."""
@@ -509,6 +583,7 @@ def retrieval_node(state: RAGState) -> Dict[str, Any]:
             "score": round(chunk.score, 4),
             "is_true_data": True,
             "chunk_index": chunk.document.metadata.get("chunk_index", 0),
+            "metadata": {k: chunk.document.metadata.get(k) for k in ("source_id", "file_path", "chunk_index")},
         }
         for chunk in true_chunks
     ]
@@ -617,6 +692,20 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
     if jira:
         steps.append("generation")
         return {"llm_response": jira[0], "model_used": "none (live Jira search)", "pipeline_steps": steps}
+
+    if is_code_request(state.get("original_query", "")):
+        from src.gateway.llm_gateway import llm_gateway as gateway
+        messages = build_code_messages(query, state.get("true_data_chunks", []), catalog,
+                                       state.get("conversation_history", []))
+        try:
+            model = gateway.code_model_string()
+            response = gateway.complete(messages, temperature=0.2, max_tokens=2000, model=model)
+        except Exception as exc:
+            logger.warning("code_model_unavailable_using_default", error=str(exc)[:200])
+            model = gateway._build_model_string()
+            response = gateway.complete(messages, temperature=0.2, max_tokens=2000) + CODE_MODEL_HINT
+        steps.append("generation")
+        return {"llm_response": response, "model_used": model, "pipeline_steps": steps}
 
     if not state.get("true_data_chunks"):
         # Nothing relevant was retrieved: a small model would answer from general

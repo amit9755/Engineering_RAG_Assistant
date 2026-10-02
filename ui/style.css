@@ -1110,3 +1110,19 @@ body.role-user #uploadAreaSources { display: none !important; }
 .attach-hint { font-size: 12px; color: var(--text-muted); }
 .message-image { display: block; max-width: 320px; max-height: 240px; border-radius: 6px; margin-bottom: 8px;
   border: 1px solid var(--border); }
+
+/* ===== Code blocks in answers ===== */
+.code-block { margin: 8px 0 10px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.code-head {
+  display: flex; justify-content: space-between; align-items: center; padding: 4px 10px;
+  background: var(--bg-hover); font-size: 11.5px; color: var(--text-secondary); font-family: var(--font-mono);
+}
+.copy-code {
+  border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-secondary);
+  border-radius: 4px; padding: 1px 8px; font-size: 11.5px; cursor: pointer;
+}
+.copy-code:hover { color: var(--accent); border-color: var(--accent); }
+.code-block pre { margin: 0; padding: 10px 12px; overflow-x: auto; background: var(--bg-primary); }
+.code-block code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; white-space: pre;
+  background: none; padding: 0; color: var(--text-primary); }
+.stream-status { color: var(--text-secondary); font-size: 13px; }

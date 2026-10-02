@@ -53,8 +53,9 @@ class LLMGateway:
             # Enable token usage tracking
             litellm.success_callback = [self._on_success]
             litellm.failure_callback = [self._on_failure]
-            # Set global timeout (seconds)
-            litellm.request_timeout = 60
+            # Local models on a CPU-only PC can take minutes (reading an image, a long
+            # code answer); a short timeout made them fail and retry.
+            litellm.request_timeout = int(os.environ.get("LLM_TIMEOUT", "600"))
             logger.info("litellm_gateway_initialized")
         except ImportError:
             logger.warning("litellm_not_installed", msg="pip install litellm")
@@ -255,6 +256,16 @@ class LLMGateway:
             delta = chunk.choices[0].delta
             if hasattr(delta, "content") and delta.content:
                 yield delta.content
+
+    def code_model_string(self) -> str:
+        """Local code model for code suggestions (OLLAMA_CODE_MODEL, default qwen2.5-coder:7b)."""
+        from dotenv import dotenv_values
+        from src import network_policy
+        env_vals = dotenv_values(".env")
+        model = (os.environ.get("OLLAMA_CODE_MODEL") or env_vals.get("OLLAMA_CODE_MODEL") or "qwen2.5-coder:7b").strip()
+        api_base = os.environ.get("OLLAMA_API_BASE", env_vals.get("OLLAMA_API_BASE", "")) or "http://localhost:11434"
+        network_policy.check_url(api_base, "the Ollama model server")
+        return f"ollama/{model}"
 
     def vision_model_string(self) -> str:
         """

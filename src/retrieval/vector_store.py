@@ -267,6 +267,31 @@ class VectorStore:
         all_results = self.similarity_search(query, k=k * 3)
         return [doc for doc in all_results if source_filter.matches(doc.metadata)][:k]
 
+    def get_file_chunks(self, source_id: str, file_path: str, around: int = 0, limit: int = 8) -> List[Document]:
+        """Consecutive chunks of one indexed file around a chunk index, in file order."""
+        if settings.vector_store_type != "chroma":
+            return []
+        data = self._store._collection.get(
+            where={"$and": [{"source_id": source_id}, {"file_path": file_path}]}, include=["documents", "metadatas"])
+        docs = sorted((Document(page_content=t, metadata=m or {}) for t, m in zip(data["documents"], data["metadatas"])),
+                      key=lambda d: d.metadata.get("chunk_index", 0))
+        if len(docs) <= limit:
+            return docs
+        start = max(0, min(around - limit // 2, len(docs) - limit))
+        return docs[start:start + limit]
+
+    def find_text(self, literal: str, source_filter=None, limit: int = 20) -> List[Document]:
+        """Chunks that contain the exact text (like "find in files"), within the selected sources."""
+        if settings.vector_store_type != "chroma" or not literal:
+            return []
+        where = source_filter.chroma_where() if source_filter is not None and not source_filter.is_empty else None
+        if source_filter is not None and source_filter.is_empty:
+            return []
+        data = self._store._collection.get(where=where, where_document={"$contains": literal}, limit=limit,
+                                           include=["documents", "metadatas"])
+        return [Document(page_content=text, metadata=meta or {})
+                for text, meta in zip(data["documents"], data["metadatas"])]
+
     def has_commit_history(self, source_id: str) -> bool:
         """True if the repository's commit history has been indexed (older indexes lack it)."""
         if settings.vector_store_type != "chroma":

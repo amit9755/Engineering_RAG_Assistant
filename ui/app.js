@@ -349,6 +349,12 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
             break;
           }
 
+          if (event.status && !fullResponse) {
+            // A slow step is running (reading an image, writing code): say what is happening.
+            const bubble = document.getElementById(`${msgId}-bubble`);
+            if (bubble) bubble.innerHTML = `<span class="spinner"></span> <span class="stream-status">${escapeHtml(event.status)}</span>`;
+          }
+
           if (event.token) {
             fullResponse += event.token;
             updateStreamingMessage(msgId, fullResponse);
@@ -454,6 +460,24 @@ function handleImageDrop(event) {
   event.preventDefault();
   addImages(Array.from(event.dataTransfer.files || []));
 }
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('.copy-code');
+  if (!button) return;
+  const code = button.closest('.code-block').querySelector('code').textContent;
+  try {
+    await navigator.clipboard.writeText(code);
+    button.textContent = 'Copied';
+  } catch {
+    // Clipboard API needs a secure context; fall back to selecting the text.
+    const range = document.createRange();
+    range.selectNodeContents(button.closest('.code-block').querySelector('code'));
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    button.textContent = 'Press Ctrl+C';
+  }
+  setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+});
 
 document.addEventListener('paste', event => {
   if (!document.getElementById('panel-chat').classList.contains('active')) return;
@@ -866,6 +890,18 @@ function formatMessageContent(text) {
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const fence = line.match(/^\s*```\s*([\w+#.-]*)\s*$/);
+    if (fence) {
+      // Fenced code block (may still be open while the answer streams in).
+      flush();
+      const code = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i++]);
+      const lang = fence[1] || 'code';
+      out.push(`<div class="code-block"><div class="code-head"><span>${lang}</span>` +
+               `<button class="copy-code" type="button">Copy</button></div><pre><code>${code.join('\n')}</code></pre></div>`);
+      continue;
+    }
     const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
     if (heading) {
       flush();

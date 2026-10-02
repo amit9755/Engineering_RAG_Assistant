@@ -190,15 +190,30 @@ text preview; they stay searchable and can be removed, but not reindexed.
 
 ### Asking about images
 
-Attach a screenshot, error dialog or diagram to a chat message with the 📎
-button, by pasting it (Ctrl+V / Cmd+V) or by dragging it onto the chat box (up
-to 3 images; they are resized in the browser). A local vision model reads the
-image; the text it reads (errors, file paths, function names) is also used to
-search your repositories, Jira and Confluence, so the answer can point to the
-relevant code. Install the model once with `ollama pull gemma3:4b` (about
-3.3 GB; change it with `OLLAMA_VISION_MODEL`). Saved chats note that an image
-was attached but do not store it. Expect roughly 5-30 s per image question on
-a GPU and longer on a CPU-only PC.
+Attach a screenshot, error dialog or diagram with the 📎 button, by pasting it
+(Ctrl+V / Cmd+V) or by dragging it onto the chat box (up to 3 images). The local
+vision model (`gemma3:4b`, `ollama pull gemma3:4b`) reads the image once,
+copying its text (errors, labels, titles, file paths, names). That text is then:
+
+- **searched word-for-word in your sources** ("find in files"): button labels,
+  messages and identifiers usually appear literally in the code. "Where is the
+  code for this screen?" is answered straight from these matches: a table of
+  files (code before docs), the matched text and line, with links.
+- used to answer other questions with the text model, together with the matches
+  and normal search results.
+
+The chat shows what it is doing ("Reading the image...") while slow steps run.
+
+### Code suggestions
+
+Ask to write, fix, refactor, add or test something ("suggest the code to add
+retry with backoff to publishInstagram", "write a unit test for X"). The code
+model (`qwen2.5-coder:7b`, `ollama pull qwen2.5-coder:7b`) gets the best-matching
+files of your repositories, expanded to consecutive chunks, and is told to reuse
+their functions, libraries and style, name the files to change, show code in
+blocks with a Copy button and list assumptions. Suggestions are never applied
+to the repository. Without the code model, the general model answers and says
+how to install the better one.
 
 ### Accounts and sign-in
 

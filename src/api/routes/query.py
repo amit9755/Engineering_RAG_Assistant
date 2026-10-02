@@ -105,29 +105,59 @@ class QueryResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _vision_inputs(request: "QueryRequest", history: list):
-    """Retrieve context for an image question; returns (messages, model, sources, true_count)."""
-    from src.retrieval.hybrid_retriever import hybrid_retriever
-    from src.graph.nodes import build_vision_messages, decode_images, format_context, knowledge_catalog
+async def image_answer_events(request: "QueryRequest", history: list):
+    """
+    Steps for a question with images, as events: {"status"}, {"token"}, then {"sources", "model"}.
+    1. the vision model reads the image once (short transcription);
+    2. text from the image is searched exactly in the sources, plus normal search;
+    3. "where is the code?" is answered from the matches directly; other questions
+       are answered by the faster text model using what the image shows.
+    """
+    from starlette.concurrency import run_in_threadpool
     from src.gateway.llm_gateway import llm_gateway
+    from src.graph.image_flow import (build_answer_messages, extract_search_terms, find_code_matches,
+                                      format_locate_answer, is_locate_question, read_image)
+    from src.graph.nodes import decode_images, format_context, knowledge_catalog
+    from src.retrieval.hybrid_retriever import hybrid_retriever
 
-    from src.graph.nodes import image_search_text
+    images = decode_images(request.images or [])          # ValueError for bad images
+    vision_model = llm_gateway.vision_model_string()
+    yield {"status": "Reading the image... (on a PC without a GPU this can take a minute)"}
+    try:
+        transcription = await run_in_threadpool(read_image, images, vision_model)
+    except Exception as exc:
+        yield {"token": _vision_error(exc)}
+        yield {"sources": [], "model": "none (image model unavailable)"}
+        return
 
-    images = decode_images(request.images or [])
+    yield {"status": "Searching your sources for text from the image..."}
     source_filter = request.source_filter()
-    model = llm_gateway.vision_model_string()
-    # Search with the question plus the text read from the image (errors, file paths, names).
-    seen = image_search_text(images, model)
-    true_chunks, _ = hybrid_retriever.retrieve(f"{request.question}\n{seen}".strip(), source_filter=source_filter)
+    terms = extract_search_terms(transcription)
+    matches = await run_in_threadpool(find_code_matches, terms, source_filter)
+    # One line: a multi-line query would be split into separate sub-questions.
+    query = " ".join([request.question] + terms)
+    true_chunks, _ = await run_in_threadpool(hybrid_retriever.retrieve, query, source_filter=source_filter)
+    chunk_files = list(dict.fromkeys(c.document.metadata.get("source_file", "unknown") for c in true_chunks))
+    sources = list(dict.fromkeys([m["file"] for m in matches] + chunk_files))
+    logger.info("image_question", terms=terms[:8], code_matches=len(matches), chunks=len(true_chunks))
+
+    if is_locate_question(request.question):
+        yield {"token": format_locate_answer(matches, chunk_files, transcription)}
+        yield {"sources": sources, "model": f"{vision_model} (read) + exact search"}
+        return
+
+    yield {"status": "Writing the answer..."}
     context = format_context([{
         "content": c.document.page_content,
         "source": c.document.metadata.get("source_file", "unknown"),
         "source_type": c.document.metadata.get("source_type", "document"),
         "score": c.score,
     } for c in true_chunks])
-    messages = build_vision_messages(request.question, context, knowledge_catalog(source_filter), history, images)
-    sources = list(dict.fromkeys(c.document.metadata.get("source_file", "unknown") for c in true_chunks))
-    return messages, model, sources, len(true_chunks)
+    catalog = await run_in_threadpool(knowledge_catalog, source_filter)
+    messages = build_answer_messages(request.question, transcription, matches, context, catalog, history)
+    async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1200):
+        yield {"token": token}
+    yield {"sources": sources, "model": f"{vision_model} (read) + {llm_gateway._build_model_string()}"}
 
 
 def _vision_error(exc: Exception) -> str:
@@ -173,22 +203,19 @@ async def query_endpoint(
     history = [{"role": msg.role, "content": msg.content} for msg in request.conversation_history]
     if request.images:
         import time
-        from starlette.concurrency import run_in_threadpool
-        from src.gateway.llm_gateway import llm_gateway
         started = time.time()
+        answer, sources, model = [], [], "unknown"
         try:
-            messages, model, sources, true_count = await run_in_threadpool(_vision_inputs, request, history)
+            async for event in image_answer_events(request, history):
+                answer.append(event.get("token", ""))
+                sources, model = event.get("sources", sources), event.get("model", model)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        try:
-            answer = await run_in_threadpool(llm_gateway.complete_via_stream, messages, 0.1, 1500, model)
-        except Exception as exc:
-            answer, model = _vision_error(exc), "none (image model unavailable)"
-        return QueryResponse(answer=answer, sources=sources, true_data_chunks=[], noisy_data_chunks=[],
-                             eval_metrics={}, pipeline_steps=["retrieval", "vision"], query_intent="image",
-                             rewritten_query=request.question, hallucination_score=0.0, model_used=model,
-                             latency_ms=int((time.time() - started) * 1000), session_id=session_id,
-                             input_safe=True, output_safe=True)
+        return QueryResponse(answer="".join(answer), sources=sources, true_data_chunks=[], noisy_data_chunks=[],
+                             eval_metrics={}, pipeline_steps=["read image", "exact search", "retrieval", "answer"],
+                             query_intent="image", rewritten_query=request.question, hallucination_score=0.0,
+                             model_used=model, latency_ms=int((time.time() - started) * 1000),
+                             session_id=session_id, input_safe=True, output_safe=True)
 
     try:
         from src.graph.pipeline import rag_pipeline
@@ -271,22 +298,20 @@ async def query_stream_endpoint(
             from src.retrieval.hybrid_retriever import hybrid_retriever
             from src.graph.nodes import (build_messages, format_context, knowledge_catalog,
                                          no_context_answer, unindexed_sources, commit_list_answer,
-                                         missing_commit_history)
+                                         missing_commit_history, is_code_request, build_code_messages,
+                                         CODE_MODEL_HINT)
             from src.gateway.llm_gateway import llm_gateway
 
             if request.images:
-                # Image questions go to the local vision model, with any matching sources as context.
+                # Image questions: read once, exact search, then answer (status updates while slow steps run).
                 try:
-                    messages, model, sources, true_count = await run_in_threadpool(_vision_inputs, request, history)
+                    async for event in image_answer_events(request, history):
+                        if "sources" in event:
+                            yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': event['sources'], 'model': event['model'], 'true_data_count': len(event['sources']), 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({**event, 'done': False})}\n\n"
                 except ValueError as exc:
                     yield f"data: {json.dumps({'error': str(exc), 'done': True})}\n\n"
-                    return
-                try:
-                    async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500, model=model):
-                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                except Exception as exc:
-                    yield f"data: {json.dumps({'token': _vision_error(exc), 'done': False})}\n\n"
-                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': sources, 'true_data_count': true_count, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
                 return
 
             # Jira filter questions (who / when / status) are answered by a live JQL search.
@@ -313,12 +338,33 @@ async def query_stream_endpoint(
                     "source": c.document.metadata.get("source_file", "unknown"),
                     "source_type": c.document.metadata.get("source_type", "document"),
                     "score": c.score,
+                    "metadata": {k: c.document.metadata.get(k) for k in ("source_id", "file_path", "chunk_index")},
                 }
                 for c in true_chunks
             ]
             direct = commit_list_answer(request.question, chunk_dicts)
 
-            if not true_chunks:
+            if is_code_request(request.question) and not direct:
+                # Code suggestion mode: code model + expanded file context; falls back to the
+                # general model (with an install hint) if the code model is not installed.
+                messages = await run_in_threadpool(build_code_messages, request.question, chunk_dicts, catalog,
+                                                   history)
+                code_model = llm_gateway.code_model_string()
+                yield f"data: {json.dumps({'status': 'Writing code with ' + code_model.split('/', 1)[1] + '...', 'done': False})}\n\n"
+                started = False
+                try:
+                    async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=2000,
+                                                           model=code_model):
+                        started = True
+                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                except Exception as exc:
+                    if started:
+                        raise
+                    logger.warning("code_model_unavailable_using_default", error=str(exc)[:200])
+                    async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=2000):
+                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                    yield f"data: {json.dumps({'token': CODE_MODEL_HINT, 'done': False})}\n\n"
+            elif not true_chunks:
                 # Nothing relevant retrieved: answer honestly instead of letting the
                 # model answer from general knowledge with invented citations.
                 answer = no_context_answer(catalog, request.question, unindexed_sources(source_filter),

@@ -45,37 +45,42 @@ def client(monkeypatch):
         yield client
 
 
-def test_stream_sends_image_to_local_vision_model(client, monkeypatch):
+def stream_events(client, body):
+    text = client.post("/api/v1/query/stream", json=body).text
+    return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def test_image_is_read_once_then_answered_by_text_model(client, monkeypatch):
     from src.gateway.llm_gateway import llm_gateway
-    calls = {}
+    from src.retrieval.hybrid_retriever import hybrid_retriever
+    reads, searched, answered = [], [], {}
+    monkeypatch.setattr(llm_gateway, "complete_via_stream", lambda messages, **k: reads.append((messages, k)) or
+                        "Error 190: Invalid OAuth access token\nat publishInstagram (lib/instagram/publish.ts:142)\n"
+                        "Image shows: an error dialog")
+    monkeypatch.setattr(hybrid_retriever, "retrieve", lambda q, **k: searched.append(q) or ([], []))
 
     async def fake_stream(messages, temperature=0.1, max_tokens=1024, model=None):
-        calls.update(messages=messages, model=model)
-        yield "The dialog shows "
-        yield "ECONNREFUSED."
+        answered.update(messages=messages, model=model)
+        yield "The token expired."
     monkeypatch.setattr(llm_gateway, "astream", fake_stream)
-    searched = []
-    monkeypatch.setattr(llm_gateway, "complete_via_stream", lambda messages, **k: "Error 190: Invalid OAuth token\npublish.ts")
-    from src.retrieval.hybrid_retriever import hybrid_retriever
-    monkeypatch.setattr(hybrid_retriever, "retrieve", lambda q, **k: searched.append(q) or ([], []))
-    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
     monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
-    body = client.post("/api/v1/query/stream", json={"question": "what is this error?", "images": [PNG]}).text
-    events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
-    assert "".join(e.get("token", "") for e in events) == "The dialog shows ECONNREFUSED."
-    assert calls["model"] == "ollama_chat/gemma3:4b"
-    assert calls["messages"][-1]["images"] == [PNG.split(",", 1)[1]]
-    assert searched == ["what is this error?\nError 190: Invalid OAuth token publish.ts"]  # image text is searched
+    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
+    events = stream_events(client, {"question": "what is this error?", "images": [PNG]})
+    assert [e["status"] for e in events if "status" in e][0].startswith("Reading the image")
+    assert len(reads) == 1 and reads[0][1]["model"] == "ollama_chat/gemma3:4b"
+    assert reads[0][0][0]["images"] == [PNG.split(",", 1)[1]] and reads[0][1]["max_tokens"] <= 400
+    assert answered["model"] is None                       # answered by the (faster) text model
+    assert "publishInstagram" in answered["messages"][0]["content"] and "images" not in answered["messages"][-1]
+    assert "\n" not in searched[0] and "publishInstagram" in searched[0]   # one-line search query
+    assert "".join(e.get("token", "") for e in events) == "The token expired."
 
 
 def test_missing_vision_model_gives_install_hint(client, monkeypatch):
     from src.gateway.llm_gateway import llm_gateway
 
-    async def missing(*a, **k):
+    def missing(*a, **k):
         raise RuntimeError('OllamaException - {"error":"model \\"gemma3:4b\\" not found, try pulling it first"}')
-        yield  # pragma: no cover
-    monkeypatch.setattr(llm_gateway, "astream", missing)
-    monkeypatch.setattr(llm_gateway, "complete_via_stream", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("not found")))
+    monkeypatch.setattr(llm_gateway, "complete_via_stream", missing)
     monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
     monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
     body = client.post("/api/v1/query/stream", json={"question": "describe", "images": [PNG]}).text
