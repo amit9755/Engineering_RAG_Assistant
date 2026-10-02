@@ -29,6 +29,8 @@ WEB_BASE = "https://bitbucket.org"
 MAX_ARCHIVE_BYTES = 300 * 1024 * 1024
 MAX_FILE_BYTES = 400 * 1024
 MAX_FILES = 5000
+MAX_COMMITS = 200          # recent commit history indexed per branch
+COMMITS_PER_CHUNK = 12
 
 TEXT_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
@@ -141,6 +143,21 @@ class BitbucketClient:
         response.raise_for_status()
         return response.json()["target"]["hash"]
 
+    def get_commits(self, workspace, repository, commit, limit=MAX_COMMITS):
+        """Newest-first history reachable from commit: [{id, author, date, message}]."""
+        url = f"{API_BASE}/repositories/{workspace}/{repository}/commits/{commit}"
+        commits, params = [], {"pagelen": 100}
+        while url and len(commits) < limit:
+            response = self._get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            for c in data.get("values", []):
+                raw_author = (c.get("author") or {}).get("raw", "")   # "Name <email>"
+                commits.append({"id": c.get("hash", ""), "author": raw_author.split("<")[0].strip() or raw_author,
+                                "date": (c.get("date") or "")[:10], "message": c.get("message", "")})
+            url, params = data.get("next"), None
+        return commits[:limit]
+
     def download_archive(self, workspace, repository, commit, on_progress=None) -> bytes:
         url = f"{WEB_BASE}/{workspace}/{repository}/get/{commit}.zip"
         response = self._get(url, stream=True, timeout=120)
@@ -227,6 +244,29 @@ class BitbucketServerClient:
             if ref.get("displayId") == branch or ref.get("id") == f"refs/heads/{branch}":
                 return ref.get("latestCommit")
         return None
+
+    def get_commits(self, project, repository, commit, limit=MAX_COMMITS):
+        """Newest-first history reachable from commit: [{id, author, date, message}]."""
+        from datetime import datetime, timezone
+        commits, start = [], 0
+        while len(commits) < limit:
+            response = self._get(self._api(project, repository, "/commits"),
+                                 params={"until": commit, "limit": 100, "start": start})
+            response.raise_for_status()
+            data = response.json()
+            for c in data.get("values", []):
+                stamp = c.get("authorTimestamp")
+                author = c.get("author") or {}
+                commits.append({
+                    "id": c.get("id", ""),
+                    "author": author.get("displayName") or author.get("name", ""),
+                    "date": datetime.fromtimestamp(stamp / 1000, timezone.utc).strftime("%Y-%m-%d") if stamp else "",
+                    "message": c.get("message", ""),
+                })
+            if data.get("isLastPage", True):
+                break
+            start = data.get("nextPageStart", start + 100)
+        return commits[:limit]
 
     def download_archive(self, project, repository, commit, on_progress=None) -> bytes:
         # prefix gives entries the same "<folder>/" layout as Bitbucket Cloud archives.
@@ -355,6 +395,28 @@ def build_documents(archive: bytes, source, cfg, branch, commit, file_url=None):
     return documents, len(paths)
 
 
+def build_commit_documents(commits, source, cfg, branch, url):
+    """
+    Recent commit history as chunks of COMMITS_PER_CHUNK, newest first. Each chunk
+    says where it sits in the history so "last 5 commits" retrieves the first one.
+    """
+    repo_name = f"{cfg.workspace}/{cfg.repository}"
+    documents = []
+    groups = [commits[i:i + COMMITS_PER_CHUNK] for i in range(0, len(commits), COMMITS_PER_CHUNK)]
+    for index, group in enumerate(groups):
+        first = index * COMMITS_PER_CHUNK + 1
+        title = ("Latest (most recent) commits" if index == 0
+                 else f"Older commits, numbers {first} to {first + len(group) - 1} counting from the newest")
+        lines = [f"Repository: {repo_name} (branch {branch})",
+                 f"Commit history, newest first. {title}. Git log of recent commits:"]
+        for n, c in enumerate(group, first):
+            message = " ".join((c.get("message") or "").split())[:300]
+            lines.append(f"{n}. {c['id'][:10]} | {c.get('date', '')} | {c.get('author', '')} | {message}")
+        documents.append(_document("\n".join(lines), source, cfg, branch, commits[0]["id"],
+                                   "(commit history)", index, len(groups), "git", url))
+    return documents
+
+
 def _document(text, source, cfg, branch, commit, path, index, total, language, url):
     repo_name = f"{cfg.workspace}/{cfg.repository}"
     return Document(page_content=text, metadata={
@@ -438,6 +500,18 @@ class BitbucketIndexer:
         documents, file_count = build_documents(archive, source, cfg, branch, commit,
                                                getattr(client, "file_url", None))
         logger.info("bitbucket_files_read", source_id=source_id, files=file_count, chunks=len(documents))
+
+        # Commit history is optional: a failure here must not lose the file index.
+        report_progress(source_id, "Fetching commit history")
+        try:
+            commits = client.get_commits(cfg.workspace, cfg.repository, commit)
+            if commits:
+                url_of = getattr(client, "file_url", None) or BitbucketClient("", "").file_url
+                documents += build_commit_documents(commits, source, cfg, branch,
+                                                    url_of(cfg.workspace, cfg.repository, commit))
+            logger.info("bitbucket_commits_read", source_id=source_id, commits=len(commits))
+        except Exception as exc:
+            logger.warning("bitbucket_commit_history_skipped", source_id=source_id, error=str(exc)[:200])
 
         # Embedding runs on the CPU and is the slow step for large repositories.
         report_progress(source_id, "Embedding chunks", 0, len(documents), "chunks")

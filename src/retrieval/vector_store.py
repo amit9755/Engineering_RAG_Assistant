@@ -237,6 +237,21 @@ class VectorStore:
         all_results = self.similarity_search(query, k=k * 3)
         return [doc for doc in all_results if source_filter.matches(doc.metadata)][:k]
 
+    def get_commit_history(self, source_filter=None, chunks_per_source: int = 2) -> List[Document]:
+        """Newest commit-history chunks of each (selected) repository, newest first."""
+        if settings.vector_store_type != "chroma":
+            return []
+        where = {"file_path": "(commit history)"}
+        if source_filter is not None:
+            if not source_filter.source_ids:
+                return []
+            where = {"$and": [where, {"source_id": {"$in": source_filter.source_ids}}]}
+        data = self._store._collection.get(where=where, include=["documents", "metadatas"])
+        docs = [Document(page_content=text, metadata=meta)
+                for text, meta in zip(data["documents"], data["metadatas"])
+                if (meta or {}).get("chunk_index", 0) < chunks_per_source]
+        return sorted(docs, key=lambda d: (d.metadata.get("source_id", ""), d.metadata.get("chunk_index", 0)))
+
     # ----------------------------------------------------------
     # Legacy chunks: uploaded before the source registry existed,
     # so they have no source_id. Grouped by their source_file.

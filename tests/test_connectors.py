@@ -442,6 +442,11 @@ class FakeServerSession:
                 {"id": "refs/heads/master", "displayId": "master", "latestCommit": "f" * 40},
                 {"id": "refs/heads/main-old", "displayId": "main-old", "latestCommit": "0" * 40}]},
         }
+        if url == f"{api}/repos/app/commits":
+            assert params["until"] == "f" * 40
+            return response(200, {"isLastPage": True, "values": [
+                {"id": f"{i:040d}", "message": f"Fix issue {i}\n\ndetails", "authorTimestamp": 1790000000000 - i,
+                 "author": {"name": "amit", "displayName": "Amit Kushwah"}} for i in range(1, 15)]})
         if url == f"{api}/repos/app/archive":
             if headers.get("Accept") == "application/json":
                 return response(406)  # what a real server does for a JSON-only Accept header
@@ -488,6 +493,12 @@ def test_server_repository_is_indexed_with_server_links(registry, vectors):
     assert meta["source_file"] == "WSQ/app/src/main.py"
     assert meta["url"] == f"{SERVER}/projects/WSQ/repos/app/browse/src/main.py?at={'f' * 40}"
     assert registry.get_bitbucket_config("bb-s").server_url == SERVER
+    history = sorted((m["chunk_index"], d) for d, m in zip(*[vectors._store._collection.get()[k]
+                     for k in ("documents", "metadatas")]) if m["file_path"] == "(commit history)")
+    assert len(history) == 2  # 14 commits, 12 per chunk
+    assert "Latest (most recent) commits" in history[0][1]
+    assert "1. 0000000000 | 2026-09-21 | Amit Kushwah | Fix issue 1 details" in history[0][1]
+    assert "numbers 13 to 14" in history[1][1]
 
 
 def test_add_server_repository_from_pasted_url(api, registry, monkeypatch):
@@ -529,3 +540,47 @@ def test_job_progress_is_reported_while_running_and_cleared_after(registry):
     assert jobs.progress() == {}  # finished jobs are removed
     jobs.report("bb-1", "ignored")  # reports for jobs that are not running are ignored
     assert jobs.progress() == {}
+
+
+def test_greetings_get_a_friendly_answer():
+    from src.graph.nodes import no_context_answer
+    catalog = ["- Bitbucket repository: WSQ/app (100 chunks)"]
+    assert no_context_answer(catalog, "hi").startswith("Hi!")
+    assert "WSQ/app" in no_context_answer(catalog, "Hello!")
+    assert "won't guess" in no_context_answer(catalog, "hi, what is the capital of France?")
+    assert "none are searchable yet" in no_context_answer([], "hey")
+
+
+def test_commit_questions_always_include_newest_history(vectors, monkeypatch):
+    with patch("src.retrieval.hybrid_retriever.SemanticReRanker._load_model"):
+        from src.retrieval.hybrid_retriever import HybridRetriever, BM25Retriever, COMMIT_INTENT
+    history = [Document(page_content=f"Commit history part {i}",
+                        metadata={"source_id": "bb-1", "file_path": "(commit history)", "chunk_index": i,
+                                  "chunk_id": f"bb-1:(commit history):{i}"}) for i in range(3)]
+    code = Document(page_content="def main(): pass", metadata={"source_id": "bb-1", "file_path": "a.py",
+                                                               "chunk_index": 0, "chunk_id": "bb-1:a.py:0"})
+    other = Document(page_content="Commit history elsewhere",
+                     metadata={"source_id": "bb-2", "file_path": "(commit history)", "chunk_index": 0,
+                               "chunk_id": "bb-2:(commit history):0"})
+    vectors._store.add_documents(history + [code, other], ids=[d.metadata["chunk_id"] for d in history + [code, other]])
+    retriever = object.__new__(HybridRetriever)
+    retriever.vector_store, retriever.bm25, retriever._bm25_ready = vectors, BM25Retriever(), True
+    retriever.reranker = Mock()
+    retriever.reranker.rerank.return_value = []  # the cross-encoder rejects everything
+    true, _ = retriever.retrieve("tell me last 5 commit", source_filter=SourceFilter(["bb-1"], []))
+    assert [c.document.metadata["chunk_index"] for c in true] == [0, 1]  # newest two parts, selected repo only
+    assert COMMIT_INTENT.search("who pushed the last change?") and not COMMIT_INTENT.search("how does login work")
+
+
+def test_last_n_commits_is_answered_exactly_from_history():
+    from src.graph.nodes import commit_list_answer
+    history = {"source": "WSQ/app/(commit history)", "content": "Repository: WSQ/app (branch main)\n"
+               "Commit history, newest first. Latest (most recent) commits. Git log of recent commits:\n" +
+               "\n".join(f"{n}. h{n:09d} | 2026-09-{30 - n:02d} | Amit | change {n}" for n in range(1, 9))}
+    answer = commit_list_answer("tell me last 5 commit", [history])
+    rows = [line for line in answer.splitlines() if line.startswith("| ") and "`" in line]
+    assert len(rows) == 5 and "`h000000001`" in rows[0] and "`h000000005`" in rows[4]
+    assert "Last 5 commits in WSQ/app" in answer
+    assert commit_list_answer("show the latest commits", [history]).count("`h0") == 8
+    assert commit_list_answer("who made the last commit and why?", [history]) is None
+    assert commit_list_answer("last 5 commits", [{"source": "a.py", "content": "x"}]) is None

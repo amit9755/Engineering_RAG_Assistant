@@ -479,14 +479,61 @@ function toggleChunk(card) {
 // UTILITY FUNCTIONS
 // ============================================================
 
-function formatMessageContent(text) {
-  // Basic markdown-like formatting for the chat bubbles
-  if (!text) return '';
-  return escapeHtml(text)
+// Inline markdown: **bold** and `code` (input is already HTML-escaped).
+function formatInline(html) {
+  return html
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br/>');
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+// Small markdown renderer for chat answers: headings, bullet / numbered lists,
+// tables and paragraphs. Everything is escaped first, so model output can't inject HTML.
+function formatMessageContent(text) {
+  if (!text) return '';
+  const lines = escapeHtml(text).split('\n');
+  const out = [];
+  let paragraph = [];
+  const flush = () => {
+    if (paragraph.length) out.push(`<p>${formatInline(paragraph.join('<br/>'))}</p>`);
+    paragraph = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
+    if (heading) {
+      flush();
+      out.push(`<h4 class="md-heading">${formatInline(heading[2])}</h4>`);
+    } else if (/^\s*\|.*\|\s*$/.test(line)) {
+      flush();
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      i--;
+      const cells = row => row.trim().replace(/^\||\|$/g, '').split('|').map(c => formatInline(c.trim()));
+      const isDivider = row => /^\s*\|[\s:|-]+\|\s*$/.test(row);
+      const body = rows.filter(r => !isDivider(r));
+      const header = rows.length > 1 && isDivider(rows[1]) ? cells(body.shift()) : null;
+      out.push('<div class="md-table-wrap"><table class="md-table">' +
+        (header ? `<thead><tr>${header.map(c => `<th>${c}</th>`).join('')}</tr></thead>` : '') +
+        `<tbody>${body.map(r => `<tr>${cells(r).map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>` +
+        '</table></div>');
+    } else if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      flush();
+      const ordered = /^\s*\d+\./.test(line);
+      const items = [];
+      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
+        items.push(`<li>${formatInline(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, ''))}</li>`);
+        i++;
+      }
+      i--;
+      out.push(ordered ? `<ol>${items.join('')}</ol>` : `<ul>${items.join('')}</ul>`);
+    } else if (!line.trim()) {
+      flush();
+    } else {
+      paragraph.push(line);
+    }
+  }
+  flush();
+  return out.join('');
 }
 
 function escapeHtml(text) {

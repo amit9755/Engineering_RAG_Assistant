@@ -194,7 +194,7 @@ async def query_stream_endpoint(
             from starlette.concurrency import run_in_threadpool
             from src.retrieval.hybrid_retriever import hybrid_retriever
             from src.graph.nodes import (build_messages, format_context, knowledge_catalog,
-                                         no_context_answer, unindexed_sources)
+                                         no_context_answer, unindexed_sources, commit_list_answer)
             from src.gateway.llm_gateway import llm_gateway
 
             true_chunks, noisy_chunks = await run_in_threadpool(
@@ -206,24 +206,28 @@ async def query_stream_endpoint(
             source_filter = request.source_filter()
             catalog = await run_in_threadpool(knowledge_catalog, source_filter)
 
+            chunk_dicts = [
+                {
+                    "content": c.document.page_content,
+                    "source": c.document.metadata.get("source_file", "unknown"),
+                    "source_type": c.document.metadata.get("source_type", "document"),
+                    "score": c.score,
+                }
+                for c in true_chunks
+            ]
+            direct = commit_list_answer(request.question, chunk_dicts)
+
             if not true_chunks:
                 # Nothing relevant retrieved: answer honestly instead of letting the
                 # model answer from general knowledge with invented citations.
-                event = json.dumps({"token": no_context_answer(
-                    catalog, request.question, unindexed_sources(source_filter)), "done": False})
-                yield f"data: {event}\n\n"
+                answer = no_context_answer(catalog, request.question, unindexed_sources(source_filter))
+                yield f"data: {json.dumps({'token': answer, 'done': False})}\n\n"
+            elif direct:
+                # "Last N commits": exact list from the indexed history, no model needed.
+                yield f"data: {json.dumps({'token': direct, 'done': False})}\n\n"
             else:
-                context = format_context([
-                    {
-                        "content": c.document.page_content,
-                        "source": c.document.metadata.get("source_file", "unknown"),
-                        "source_type": c.document.metadata.get("source_type", "document"),
-                        "score": c.score,
-                    }
-                    for c in true_chunks
-                ])
-                messages = build_messages(guard_result.sanitized_text, context, catalog, history,
-                                          request.question)
+                messages = build_messages(guard_result.sanitized_text, format_context(chunk_dicts), catalog,
+                                          history, request.question)
                 async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500):
                     event = json.dumps({"token": token, "done": False})
                     yield f"data: {event}\n\n"

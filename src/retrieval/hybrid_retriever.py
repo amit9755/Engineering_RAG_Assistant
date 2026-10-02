@@ -220,6 +220,14 @@ class SemanticReRanker:
         return scored_chunks
 
 
+# Questions about commits are answered from the indexed commit history. The
+# cross-encoder judges that history poorly ("last 5 commits" scores ~0, "latest
+# 5 commits" ~1), so it is included directly instead of relying on its score.
+COMMIT_INTENT = re.compile(
+    r"\b(commits?|committed|git log|commit history|recent changes|latest changes|changelog|"
+    r"who (changed|pushed|modified)|last (change|push|update)s?)\b", re.I)
+
+
 def split_questions(text: str) -> List[str]:
     """Split a message into separate questions (one per line or per '?')."""
     import re
@@ -366,6 +374,15 @@ class HybridRetriever:
         # Step 5: Split True Data vs Noisy Data
         true_data = [c for c in scored_chunks if c.is_true_data][:limit]
         noisy_data = [c for c in scored_chunks if not c.is_true_data]
+
+        # Step 6: commit questions always get the newest commit history
+        if COMMIT_INTENT.search(query):
+            history = self.vector_store.get_commit_history(source_filter)
+            keys = {_chunk_key(d) for d in history}
+            true_data = ([ScoredChunk(d, 1.0, True, "commit-history") for d in history] +
+                         [c for c in true_data if _chunk_key(c.document) not in keys])[:max(limit, len(history))]
+            noisy_data = [c for c in noisy_data if _chunk_key(c.document) not in keys]
+            logger.info("commit_history_included", chunks=len(history))
 
         return true_data, noisy_data
 

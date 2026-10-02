@@ -241,7 +241,19 @@ def no_context_answer(catalog: List[str], query: str = "", pending: List[str] = 
     return _no_context_answer(catalog, query) + note
 
 
+_GREETING = re.compile(r"^\s*(hi+|hello|hey|hii+|good (morning|afternoon|evening)|namaste|thanks|thank you)\b"
+                       r"[\s!.,?]*$", re.I)
+
+
 def _no_context_answer(catalog: List[str], query: str = "") -> str:
+    if _GREETING.match(query or ""):
+        if not catalog:
+            return ("Hi! I answer questions from your own knowledge sources, but none are searchable yet. "
+                    "Add documents, a Bitbucket repository, or a Jira project under **Knowledge Sources**.")
+        return ("Hi! I answer questions using only your connected knowledge sources and cite where "
+                "each answer comes from.\n\n**Sources I can search right now:**\n" + "\n".join(catalog) +
+                "\n\nFor example, ask how a feature works, which files implement something, "
+                "or what the latest commits were.")
     if catalog and _ABOUT_ASSISTANT.search(query or ""):
         return ("I answer questions using only the knowledge sources you've connected, and I cite "
                 "the file, document, or Jira issue each answer comes from.\n\n"
@@ -257,6 +269,42 @@ def _no_context_answer(catalog: List[str], query: str = "") -> str:
             "**I can answer questions about:**\n" + "\n".join(catalog) +
             "\n\nTry asking about something specific in these sources, for example a feature, "
             "file, workflow, or issue, or select more sources under **Search In**.")
+
+
+_COMMIT_LIST = re.compile(
+    r"\b(?:last|latest|recent|newest|top)\s+(\d{1,3})\s+commits?\b"
+    r"|\b(?:list|show|give|tell|display)\b[^?]*\b(?:last|latest|recent|newest)\s+commits\b", re.I)
+_COMMIT_LINE = re.compile(r"^(\d+)\. (\S+) \| ([^|]*) \| ([^|]*) \| (.*)$")
+
+
+def commit_list_answer(query: str, chunks: List[Dict]) -> str:
+    """
+    Answer "last N commits" directly from the indexed commit history, so the list is
+    exact and in order (a small model re-orders and skips lines). None if not applicable.
+    """
+    match = _COMMIT_LIST.search(query or "")
+    if not match:
+        return None
+    count = min(int(match.group(1)), 50) if match.group(1) else 10
+    repos = {}
+    for chunk in chunks:
+        if not chunk.get("source", "").endswith("/(commit history)"):
+            continue
+        repo = chunk["source"][: -len("/(commit history)")]
+        for line in chunk.get("content", "").splitlines():
+            parsed = _COMMIT_LINE.match(line.strip())
+            if parsed:
+                repos.setdefault(repo, {})[int(parsed.group(1))] = parsed.groups()[1:]
+    if not repos:
+        return None
+    parts = []
+    for repo, commits in repos.items():
+        rows = [commits[n] for n in sorted(commits)[:count]]
+        parts.append(f"### Last {len(rows)} commits in {repo}\n\n| # | Commit | Date | Author | Message |\n"
+                     "|---|---|---|---|---|\n" +
+                     "\n".join(f"| {i} | `{h}` | {d.strip()} | {a.strip()} | {m.strip().replace('|', '/')} |"
+                                for i, (h, d, a, m) in enumerate(rows, 1)))
+    return "\n\n".join(parts) + "\n\n(from the indexed commit history, newest first)"
 
 
 def build_messages(query: str, context: str, catalog: List[str], history: List[Dict],
@@ -422,6 +470,11 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
         return {"llm_response": no_context_answer(catalog, state.get("original_query", ""), pending),
                 "model_used": "none (no matching sources)",
                 "pipeline_steps": steps}
+
+    direct = commit_list_answer(state.get("original_query", ""), state.get("true_data_chunks", []))
+    if direct:
+        steps.append("generation")
+        return {"llm_response": direct, "model_used": "none (commit history)", "pipeline_steps": steps}
 
     messages = build_messages(query, context, catalog, state.get("conversation_history", []),
                               state.get("original_query", ""))
