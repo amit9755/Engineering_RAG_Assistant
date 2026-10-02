@@ -535,6 +535,13 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
     catalog = knowledge_catalog(state.get("source_filter"))
 
     steps = state.get("pipeline_steps", [])
+    # Jira filter questions (who / when / status) are answered by a live JQL search.
+    from src.sources.jira_query import answer_jira_question
+    jira = answer_jira_question(state.get("original_query", ""), state.get("source_filter"))
+    if jira:
+        steps.append("generation")
+        return {"llm_response": jira[0], "model_used": "none (live Jira search)", "pipeline_steps": steps}
+
     if not state.get("true_data_chunks"):
         # Nothing relevant was retrieved: a small model would answer from general
         # knowledge and invent citations, so answer honestly without calling it.

@@ -121,6 +121,36 @@ class JiraClient:
         data = self.api.json(me, "connection test")
         return {"display_name": data.get("displayName") or data.get("name"), "projects_found": count}
 
+    def search(self, jql: str, limit: int = 50, fields: str = None):
+        """Run a JQL search; returns (issues up to limit, total matches)."""
+        from src.sources.jira_query import FIELDS as LIST_FIELDS
+        fields = fields or LIST_FIELDS
+        issues = []
+        if not self.api.cloud:
+            while len(issues) < limit:
+                response = self._get("/rest/api/2/search", {"jql": jql, "fields": fields, "startAt": len(issues),
+                                                            "maxResults": min(100, limit - len(issues))})
+                self._raise_for_search(response, None, jql)
+                data = self.api.json(response, "issue search")
+                page = data.get("issues", [])
+                issues += page
+                if not page or len(issues) >= data.get("total", 0):
+                    return issues, data.get("total", len(issues))
+            return issues, max(len(issues), data.get("total", 0))
+        token = None
+        while len(issues) < limit:
+            params = {"jql": jql, "fields": fields, "maxResults": min(100, limit - len(issues))}
+            if token:
+                params["nextPageToken"] = token
+            response = self._get("/rest/api/3/search/jql", params)
+            self._raise_for_search(response, None, jql)
+            data = self.api.json(response, "issue search")
+            issues += data.get("issues", [])
+            token = data.get("nextPageToken")
+            if not token or data.get("isLast"):
+                break
+        return issues, len(issues)
+
     def search_issues(self, project_key: str, on_page=None):
         jql = f'project = "{project_key}" ORDER BY updated DESC'
         if not self.api.cloud:
@@ -160,9 +190,15 @@ class JiraClient:
                 break
         return issues[:MAX_ISSUES]
 
-    @staticmethod
-    def _raise_for_search(response, project_key):
+    def _raise_for_search(self, response, project_key, jql=None):
         if response.status_code == 400:
+            detail = ""
+            try:
+                detail = "; ".join(self.api.json(response, "search").get("errorMessages") or [])
+            except Exception:
+                pass
+            if jql:
+                raise IndexingError(f"Jira rejected the query{': ' + detail if detail else ''} (JQL: {jql})")
             raise IndexingError(f"Jira could not search project '{project_key}'. "
                                 "Check the project key and that your account can browse it.")
         if response.status_code != 200:

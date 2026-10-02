@@ -1068,3 +1068,6 @@ body {
 .picker-done { opacity: 0.6; cursor: default; }
 .picker-count { margin-top: 6px; font-size: 11.5px; color: var(--text-muted); }
 .modal { max-width: 560px; }
+
+.message-bubble a { color: var(--accent); text-decoration: none; }
+.message-bubble a:hover { text-decoration: underline; }

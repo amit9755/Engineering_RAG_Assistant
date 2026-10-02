@@ -220,6 +220,15 @@ async def query_stream_endpoint(
                                          missing_commit_history)
             from src.gateway.llm_gateway import llm_gateway
 
+            # Jira filter questions (who / when / status) are answered by a live JQL search.
+            from src.sources.jira_query import answer_jira_question
+            jira = await run_in_threadpool(answer_jira_question, request.question, request.source_filter())
+            if jira:
+                answer, keys = jira
+                yield f"data: {json.dumps({'token': answer, 'done': False})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': keys, 'true_data_count': 0, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
+                return
+
             true_chunks, noisy_chunks = await run_in_threadpool(
                 hybrid_retriever.retrieve,
                 guard_result.sanitized_text,
