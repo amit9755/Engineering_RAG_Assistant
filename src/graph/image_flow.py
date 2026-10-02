@@ -32,12 +32,62 @@ _PATH = re.compile(r"[\w./-]+\.(?:py|js|jsx|ts|tsx|java|go|rb|php|cs|cpp|c|h|htm
 _QUOTED = re.compile(r"[\"'“‘`]([^\"'”’`]{4,80})[\"'”’`]")
 
 
+class ImageModelError(Exception):
+    """Ollama refused the image request; the message says what to do."""
+
+
+def _ollama_base() -> str:
+    import os
+    from dotenv import dotenv_values
+    return (os.environ.get("OLLAMA_API_BASE") or dotenv_values(".env").get("OLLAMA_API_BASE")
+            or "http://localhost:11434").rstrip("/")
+
+
+def explain_ollama_error(model: str, status: int, message: str) -> str:
+    """Ollama's own error, turned into an instruction."""
+    text = (message or "").lower()
+    if status == 404 or "not found" in text or "pull" in text:
+        return f"The image model **{model}** is not installed in Ollama. Run `ollama pull {model}`, then ask again."
+    if "unknown model architecture" in text or "unsupported" in text or "does not support" in text:
+        return (f"This Ollama version cannot run **{model}**. Update Ollama (download the latest from "
+                "https://ollama.com/download, or `winget upgrade Ollama.Ollama`), restart it, then ask again.")
+    if "memory" in text or "out of memory" in text or "oom" in text:
+        return (f"Not enough memory to load **{model}** next to the other models. Close other programs or "
+                "restart Ollama, then ask again.")
+    return f"Ollama could not read the image (HTTP {status}): {message[:300]}"
+
+
 def read_image(images_b64: List[str], model: str) -> str:
-    """Transcription + one-line description of the images (one short vision pass)."""
-    from src.gateway.llm_gateway import llm_gateway
-    return llm_gateway.complete_via_stream(
-        [{"role": "user", "content": READ_PROMPT, "images": images_b64}],
-        temperature=0.0, max_tokens=400, model=model).strip()
+    """
+    Transcription + one-line description of the images (one short vision pass).
+    Calls Ollama's chat API directly: LiteLLM hides Ollama's error text when a
+    streamed request fails ("<generator object Response.iter_lines ...>").
+    """
+    import os
+    import requests
+    from src import network_policy
+    name = model.split("/", 1)[-1]
+    url = f"{_ollama_base()}/api/chat"
+    network_policy.check_url(url, "the Ollama model server")
+    body = {"model": name, "stream": False, "keep_alive": "10m",
+            "options": {"temperature": 0, "num_predict": 400, "num_ctx": 8192},
+            "messages": [{"role": "user", "content": READ_PROMPT, "images": images_b64}]}
+    try:
+        response = requests.post(url, json=body, timeout=int(os.environ.get("LLM_TIMEOUT", "600")))
+    except requests.exceptions.Timeout as exc:
+        raise ImageModelError("Reading the image took too long. Try a smaller screenshot, or raise LLM_TIMEOUT "
+                              "in .env.") from exc
+    except requests.RequestException as exc:
+        raise ImageModelError("Cannot reach Ollama. Make sure Ollama is running (open the Ollama app or run "
+                              "`ollama serve`).") from exc
+    if response.status_code != 200:
+        try:
+            message = response.json().get("error", response.text)
+        except ValueError:
+            message = response.text
+        logger.warning("ollama_image_error", status=response.status_code, error=message[:300])
+        raise ImageModelError(explain_ollama_error(name, response.status_code, message))
+    return ((response.json().get("message") or {}).get("content") or "").strip()
 
 
 def extract_search_terms(text: str, limit: int = 14) -> List[str]:

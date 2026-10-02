@@ -115,8 +115,8 @@ async def image_answer_events(request: "QueryRequest", history: list):
     """
     from starlette.concurrency import run_in_threadpool
     from src.gateway.llm_gateway import llm_gateway
-    from src.graph.image_flow import (build_answer_messages, extract_search_terms, find_code_matches,
-                                      format_locate_answer, is_locate_question, read_image)
+    from src.graph.image_flow import (ImageModelError, build_answer_messages, extract_search_terms,
+                                      find_code_matches, format_locate_answer, is_locate_question, read_image)
     from src.graph.nodes import decode_images, format_context, knowledge_catalog
     from src.retrieval.hybrid_retriever import hybrid_retriever
 
@@ -125,6 +125,10 @@ async def image_answer_events(request: "QueryRequest", history: list):
     yield {"status": "Reading the image... (on a PC without a GPU this can take a minute)"}
     try:
         transcription = await run_in_threadpool(read_image, images, vision_model)
+    except ImageModelError as exc:
+        yield {"token": str(exc)}
+        yield {"sources": [], "model": "none (image model unavailable)"}
+        return
     except Exception as exc:
         yield {"token": _vision_error(exc)}
         yield {"sources": [], "model": "none (image model unavailable)"}

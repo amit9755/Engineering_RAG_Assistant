@@ -380,22 +380,6 @@ def suggest_followups(question: str, answer: str, sources: List[str], catalog: L
     return out[:3] or default_suggestions(catalog)
 
 
-VISION_PROMPT = """You are a precise engineering assistant. The user attached image(s) - typically a
-screenshot, error message, log, diagram or UI. Answer their question about the image.
-
-How to answer:
-- First read the image carefully: quote any error text, codes, names or values exactly as shown.
-- Use the numbered sources below when they are relevant (they come from the user's repositories,
-  Jira, Confluence and documents) and cite them by file path or Jira key.
-- If the sources are unrelated to the image, answer from the image alone and say so briefly.
-- If something in the image is unreadable or unclear, say so instead of guessing.
-
-Knowledge sources the user selected:
-{catalog}
-
-Sources:
-{context}"""
-
 MAX_IMAGES = 3
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
 _DATA_URL = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=\s]+)$", re.I)
@@ -420,40 +404,6 @@ def decode_images(images: List[str]) -> List[str]:
             raise ValueError("Each image must be under 6 MB")
         out.append(data)
     return out
-
-
-IMAGE_TEXT_PROMPT = ("List the exact text visible in this image that identifies the problem or topic: error "
-                     "messages and codes, file paths, function and class names, IDs, titles and labels. "
-                     "Plain text, at most 12 short lines, no commentary.")
-
-
-def image_search_text(images_b64: List[str], model: str) -> str:
-    """
-    Text read from the images, used to search the knowledge sources: a screenshot's
-    error message or file path finds the relevant code far better than the typed
-    question alone ("what does this error mean?").
-    """
-    from src.gateway.llm_gateway import llm_gateway
-    try:
-        text = llm_gateway.complete_via_stream(
-            [{"role": "user", "content": IMAGE_TEXT_PROMPT, "images": images_b64}],
-            temperature=0.0, max_tokens=250, model=model)
-        return " ".join((text or "").split())[:800]
-    except Exception as exc:
-        logger.warning("image_text_extraction_failed", error=str(exc)[:200])
-        return ""
-
-
-def build_vision_messages(question: str, context: str, catalog: List[str], history: List[Dict],
-                          images_b64: List[str]) -> List[Dict]:
-    """Ollama chat format: the images ride on the user message."""
-    messages = [{"role": "system", "content": VISION_PROMPT.format(
-        context=context or "(no matching sources)", catalog="\n".join(catalog) or "(none)")}]
-    if history and history[-1].get("content") == question:
-        history = history[:-1]
-    messages += [{"role": m["role"], "content": m["content"]} for m in history[-4:]]
-    messages.append({"role": "user", "content": question or "Describe this image.", "images": images_b64})
-    return messages
 
 
 # "write / implement / fix / refactor / add tests ..." -> code suggestion mode.

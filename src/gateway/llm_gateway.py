@@ -185,20 +185,6 @@ class LLMGateway:
         answer = response.choices[0].message.content
         return answer
 
-    def complete_via_stream(self, messages: List[Dict[str, Any]], temperature: float = 0.1,
-                            max_tokens: int = 1024, model: Optional[str] = None) -> str:
-        """
-        Same as complete(), but read through a stream. Needed for messages that carry
-        images: LiteLLM's non-streaming Ollama chat path fails counting their tokens.
-        """
-        import litellm
-
-        model_name = model or self._build_model_string()
-        response = litellm.completion(model=model_name, messages=messages, temperature=temperature,
-                                      max_tokens=max_tokens, stream=True, **self._provider_options(model_name))
-        return "".join((chunk.choices[0].delta.content or "") for chunk in response
-                       if chunk.choices and getattr(chunk.choices[0].delta, "content", None))
-
     async def acomplete(
         self,
         messages: List[Dict[str, str]],

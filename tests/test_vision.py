@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from src.graph.nodes import build_vision_messages, decode_images
+from src.graph.nodes import decode_images
 
 PNG = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 100).decode()
 
@@ -22,16 +22,6 @@ def test_decode_images_validates_type_count_and_size():
     big = "data:image/jpeg;base64," + base64.b64encode(b"0" * (6 * 1024 * 1024 + 1)).decode()
     with pytest.raises(ValueError, match="under 6 MB"):
         decode_images([big])
-
-
-def test_vision_messages_put_images_on_the_user_message():
-    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"},
-               {"role": "user", "content": "what is this error?"}]
-    messages = build_vision_messages("what is this error?", "[1] (code) a.py\nx", ["- repo"], history, ["QUJD"])
-    assert messages[0]["role"] == "system" and "attached image" in messages[0]["content"]
-    assert messages[-1] == {"role": "user", "content": "what is this error?", "images": ["QUJD"]}
-    assert [m["content"] for m in messages[1:-1]] == ["earlier", "answer"]   # current question not duplicated
-    assert all("images" not in m for m in messages[:-1])
 
 
 @pytest.fixture
@@ -54,7 +44,8 @@ def test_image_is_read_once_then_answered_by_text_model(client, monkeypatch):
     from src.gateway.llm_gateway import llm_gateway
     from src.retrieval.hybrid_retriever import hybrid_retriever
     reads, searched, answered = [], [], {}
-    monkeypatch.setattr(llm_gateway, "complete_via_stream", lambda messages, **k: reads.append((messages, k)) or
+    import src.graph.image_flow as flow
+    monkeypatch.setattr(flow, "read_image", lambda images, model: reads.append((images, model)) or
                         "Error 190: Invalid OAuth access token\nat publishInstagram (lib/instagram/publish.ts:142)\n"
                         "Image shows: an error dialog")
     monkeypatch.setattr(hybrid_retriever, "retrieve", lambda q, **k: searched.append(q) or ([], []))
@@ -67,8 +58,7 @@ def test_image_is_read_once_then_answered_by_text_model(client, monkeypatch):
     monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
     events = stream_events(client, {"question": "what is this error?", "images": [PNG]})
     assert [e["status"] for e in events if "status" in e][0].startswith("Reading the image")
-    assert len(reads) == 1 and reads[0][1]["model"] == "ollama_chat/gemma3:4b"
-    assert reads[0][0][0]["images"] == [PNG.split(",", 1)[1]] and reads[0][1]["max_tokens"] <= 400
+    assert reads == [([PNG.split(",", 1)[1]], "ollama_chat/gemma3:4b")]   # read once
     assert answered["model"] is None                       # answered by the (faster) text model
     assert "publishInstagram" in answered["messages"][0]["content"] and "images" not in answered["messages"][-1]
     assert "\n" not in searched[0] and "publishInstagram" in searched[0]   # one-line search query
@@ -78,9 +68,10 @@ def test_image_is_read_once_then_answered_by_text_model(client, monkeypatch):
 def test_missing_vision_model_gives_install_hint(client, monkeypatch):
     from src.gateway.llm_gateway import llm_gateway
 
-    def missing(*a, **k):
-        raise RuntimeError('OllamaException - {"error":"model \\"gemma3:4b\\" not found, try pulling it first"}')
-    monkeypatch.setattr(llm_gateway, "complete_via_stream", missing)
+    from unittest.mock import Mock
+    reply = Mock(status_code=404, text="")
+    reply.json.return_value = {"error": 'model "gemma3:4b" not found, try pulling it first'}
+    monkeypatch.setattr("requests.post", lambda *a, **k: reply)
     monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
     monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
     body = client.post("/api/v1/query/stream", json={"question": "describe", "images": [PNG]}).text
@@ -92,3 +83,45 @@ def test_bad_image_is_rejected(client):
     assert "PNG, JPEG, WebP or GIF" in body
     r = client.post("/api/v1/query", json={"question": "x", "images": ["nope"]})
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("status,error,expected", [
+    (404, 'model "gemma3:4b" not found, try pulling it first', "ollama pull gemma3:4b"),
+    (500, "unknown model architecture: 'gemma3'", "Update Ollama"),
+    (500, "model requires more system memory (5.1 GiB) than is available (3.2 GiB)", "Not enough memory"),
+    (500, "something else broke", "HTTP 500): something else broke"),
+])
+def test_ollama_image_errors_are_explained(monkeypatch, status, error, expected):
+    from unittest.mock import Mock
+    from src.graph.image_flow import ImageModelError, read_image
+    reply = Mock(status_code=status, text=error)
+    reply.json.return_value = {"error": error}
+    monkeypatch.setattr("requests.post", lambda *a, **k: reply)
+    with pytest.raises(ImageModelError, match=expected.replace("(", r"\(").replace(")", r"\)")):
+        read_image(["QUJD"], "ollama_chat/gemma3:4b")
+
+
+def test_read_image_calls_ollama_chat_directly(monkeypatch):
+    from unittest.mock import Mock
+    from src.graph.image_flow import read_image
+    calls = {}
+    reply = Mock(status_code=200)
+    reply.json.return_value = {"message": {"content": " Error 190\nImage shows: a dialog "}}
+    monkeypatch.setattr("requests.post", lambda url, json, timeout: calls.update(url=url, body=json) or reply)
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+    monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
+    assert read_image(["QUJD"], "ollama_chat/gemma3:4b") == "Error 190\nImage shows: a dialog"
+    assert calls["url"] == "http://localhost:11434/api/chat"
+    assert calls["body"]["model"] == "gemma3:4b" and calls["body"]["messages"][0]["images"] == ["QUJD"]
+    assert calls["body"]["stream"] is False
+
+
+def test_ollama_not_running_is_explained(monkeypatch):
+    import requests
+    from src.graph.image_flow import ImageModelError, read_image
+
+    def refuse(*a, **k):
+        raise requests.ConnectionError("refused")
+    monkeypatch.setattr("requests.post", refuse)
+    with pytest.raises(ImageModelError, match="Make sure Ollama is running"):
+        read_image(["QUJD"], "ollama_chat/gemma3:4b")

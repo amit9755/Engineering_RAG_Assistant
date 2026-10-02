@@ -84,7 +84,8 @@ def test_where_is_the_code_is_answered_without_a_long_generation(code_index, mon
     from src.gateway.llm_gateway import llm_gateway
     from src.retrieval.hybrid_retriever import hybrid_retriever
     from src.graph import nodes
-    monkeypatch.setattr(llm_gateway, "complete_via_stream", lambda *a, **k: TRANSCRIPTION)
+    import src.graph.image_flow as flow
+    monkeypatch.setattr(flow, "read_image", lambda *a, **k: TRANSCRIPTION)
     monkeypatch.setattr(hybrid_retriever, "retrieve", lambda *a, **k: ([], []))
     monkeypatch.setattr(nodes, "knowledge_catalog", lambda f=None: [])
 

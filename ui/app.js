@@ -248,6 +248,7 @@ async function sendQuery() {
 
   const useStreaming = document.getElementById('streamingMode').checked;
 
+  state.abortController = new AbortController();
   setLoading(true);
 
   if (useStreaming) {
@@ -263,6 +264,7 @@ async function sendNormalQuery(question, sourceFilter, images = []) {
 
   try {
     const res = await fetch(`${API_BASE}/query`, {
+      signal: state.abortController?.signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-User-ID': 'ui-user' },
       body: JSON.stringify({
@@ -303,7 +305,12 @@ async function sendNormalQuery(question, sourceFilter, images = []) {
 
   } catch (err) {
     removeTypingIndicator(typingId);
-    addMessage('assistant', `Connection error: ${err.message}. Is the server running?`, { error: true });
+    if (err.name === 'AbortError') {
+      addMessage('assistant', '_Stopped._');
+      afterAnswer(null, question, '(stopped)', [], sourceFilter, false);
+    } else {
+      addMessage('assistant', `Connection error: ${err.message}. Is the server running?`, { error: true });
+    }
   } finally {
     setLoading(false);
   }
@@ -312,9 +319,11 @@ async function sendNormalQuery(question, sourceFilter, images = []) {
 async function sendStreamingQuery(question, sourceFilter, images = []) {
   // Create an empty assistant message that we'll fill in
   const msgId = addStreamingMessage();
+  let fullResponse = '';   // outside try: a stopped answer keeps what was written
 
   try {
     const res = await fetch(`${API_BASE}/query/stream`, {
+      signal: state.abortController?.signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-User-ID': 'ui-user' },
       body: JSON.stringify({
@@ -328,7 +337,6 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let fullResponse = '';
     let pending = '';   // a long event can arrive split across network reads
 
     while (true) {
@@ -370,7 +378,15 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
       }
     }
   } catch (err) {
-    updateStreamingMessage(msgId, `Connection error: ${err.message}`);
+    if (err.name === 'AbortError') {
+      // Keep what was written so far and mark it as stopped.
+      const partial = (fullResponse.trim() ? fullResponse + '\n\n' : '') + '_Stopped._';
+      updateStreamingMessage(msgId, partial);
+      state.conversationHistory.push({ role: 'assistant', content: partial });
+      afterAnswer(msgId, question, partial, [], sourceFilter, false);
+    } else {
+      updateStreamingMessage(msgId, `Connection error: ${err.message}`);
+    }
   } finally {
     setLoading(false);
   }
@@ -494,10 +510,10 @@ document.addEventListener('paste', event => {
 // AFTER EACH ANSWER: save the chat, then suggest follow-up questions
 // ============================================================
 
-function afterAnswer(msgId, question, answer, sources, sourceFilter) {
+function afterAnswer(msgId, question, answer, sources, sourceFilter, suggest = true) {
   state.chatMessages.push({ role: 'assistant', content: answer, sources });
   saveCurrentChat();
-  loadSuggestions(msgId, question, answer, sources, sourceFilter);
+  if (suggest && msgId) loadSuggestions(msgId, question, answer, sources, sourceFilter);
 }
 
 async function loadSuggestions(msgId, question, answer, sources, sourceFilter) {
@@ -957,9 +973,26 @@ function setLoading(loading) {
   state.isLoading = loading;
   const btn = document.getElementById('sendBtn');
   const icon = document.getElementById('sendIcon');
-  btn.disabled = loading;
-  icon.innerHTML = loading ? '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>' : '&#9658;';
+  // While an answer is being generated the send button becomes a Stop button.
+  btn.classList.toggle('btn-stop', loading);
+  btn.title = loading ? 'Stop generating (Esc)' : 'Send (Enter)';
+  icon.innerHTML = loading ? '&#9632;' : '&#9658;';
+  if (!loading) state.abortController = null;
 }
+
+function sendOrStop() {
+  if (state.isLoading) stopGenerating();
+  else sendQuery();
+}
+
+// Abort the request: the server stops the model when the connection closes.
+function stopGenerating() {
+  if (state.abortController) state.abortController.abort();
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.isLoading) stopGenerating();
+});
 
 function handleKeyDown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {

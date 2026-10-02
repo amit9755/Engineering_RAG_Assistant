@@ -1126,3 +1126,7 @@ body.role-user #uploadAreaSources { display: none !important; }
 .code-block code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; white-space: pre;
   background: none; padding: 0; color: var(--text-primary); }
 .stream-status { color: var(--text-secondary); font-size: 13px; }
+
+/* Send button turns into Stop while an answer is generated */
+.btn-send.btn-stop { background: var(--accent-red); }
+.btn-send.btn-stop:hover { background: #b91c1c; }
