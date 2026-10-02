@@ -184,6 +184,20 @@ class LLMGateway:
         answer = response.choices[0].message.content
         return answer
 
+    def complete_via_stream(self, messages: List[Dict[str, Any]], temperature: float = 0.1,
+                            max_tokens: int = 1024, model: Optional[str] = None) -> str:
+        """
+        Same as complete(), but read through a stream. Needed for messages that carry
+        images: LiteLLM's non-streaming Ollama chat path fails counting their tokens.
+        """
+        import litellm
+
+        model_name = model or self._build_model_string()
+        response = litellm.completion(model=model_name, messages=messages, temperature=temperature,
+                                      max_tokens=max_tokens, stream=True, **self._provider_options(model_name))
+        return "".join((chunk.choices[0].delta.content or "") for chunk in response
+                       if chunk.choices and getattr(chunk.choices[0].delta, "content", None))
+
     async def acomplete(
         self,
         messages: List[Dict[str, str]],
@@ -241,6 +255,20 @@ class LLMGateway:
             delta = chunk.choices[0].delta
             if hasattr(delta, "content") and delta.content:
                 yield delta.content
+
+    def vision_model_string(self) -> str:
+        """
+        Local vision model for questions with images. Uses LiteLLM's ollama_chat
+        provider: it forwards each message's "images" to Ollama unchanged, whereas
+        the plain ollama provider drops images for non-llava models.
+        """
+        from dotenv import dotenv_values
+        from src import network_policy
+        env_vals = dotenv_values(".env")
+        model = (os.environ.get("OLLAMA_VISION_MODEL") or env_vals.get("OLLAMA_VISION_MODEL") or "gemma3:4b").strip()
+        api_base = os.environ.get("OLLAMA_API_BASE", env_vals.get("OLLAMA_API_BASE", "")) or "http://localhost:11434"
+        network_policy.check_url(api_base, "the Ollama model server")
+        return f"ollama_chat/{model}"
 
     @staticmethod
     def _provider_options(model_name: str) -> Dict[str, Any]:

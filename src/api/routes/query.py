@@ -51,6 +51,9 @@ class QueryRequest(BaseModel):
     legacy_files: Optional[List[str]] = Field(
         default=None, description="Unregistered (pre-registry) uploaded files to search, by name",
     )
+    images: Optional[List[str]] = Field(
+        default=None, description="Up to 3 images as data URLs (PNG, JPEG, WebP, GIF), answered by the vision model",
+    )
 
     def source_filter(self):
         from src.retrieval.source_filter import SourceFilter
@@ -102,6 +105,41 @@ class QueryResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _vision_inputs(request: "QueryRequest", history: list):
+    """Retrieve context for an image question; returns (messages, model, sources, true_count)."""
+    from src.retrieval.hybrid_retriever import hybrid_retriever
+    from src.graph.nodes import build_vision_messages, decode_images, format_context, knowledge_catalog
+    from src.gateway.llm_gateway import llm_gateway
+
+    from src.graph.nodes import image_search_text
+
+    images = decode_images(request.images or [])
+    source_filter = request.source_filter()
+    model = llm_gateway.vision_model_string()
+    # Search with the question plus the text read from the image (errors, file paths, names).
+    seen = image_search_text(images, model)
+    true_chunks, _ = hybrid_retriever.retrieve(f"{request.question}\n{seen}".strip(), source_filter=source_filter)
+    context = format_context([{
+        "content": c.document.page_content,
+        "source": c.document.metadata.get("source_file", "unknown"),
+        "source_type": c.document.metadata.get("source_type", "document"),
+        "score": c.score,
+    } for c in true_chunks])
+    messages = build_vision_messages(request.question, context, knowledge_catalog(source_filter), history, images)
+    sources = list(dict.fromkeys(c.document.metadata.get("source_file", "unknown") for c in true_chunks))
+    return messages, model, sources, len(true_chunks)
+
+
+def _vision_error(exc: Exception) -> str:
+    text = str(exc)
+    if "not found" in text.lower() and ("model" in text.lower() or "pull" in text.lower()):
+        from src.gateway.llm_gateway import llm_gateway
+        model = llm_gateway.vision_model_string().split("/", 1)[1]
+        return (f"The image model **{model}** is not installed in Ollama. Run `ollama pull {model}` once, "
+                "then ask again.")
+    return f"Could not analyse the image: {text[:300]}"
+
+
 @router.post("/query", response_model=QueryResponse, summary="Ask a question")
 async def query_endpoint(
     request: QueryRequest,
@@ -132,14 +170,28 @@ async def query_endpoint(
         question_len=len(request.question),
     )
 
+    history = [{"role": msg.role, "content": msg.content} for msg in request.conversation_history]
+    if request.images:
+        import time
+        from starlette.concurrency import run_in_threadpool
+        from src.gateway.llm_gateway import llm_gateway
+        started = time.time()
+        try:
+            messages, model, sources, true_count = await run_in_threadpool(_vision_inputs, request, history)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        try:
+            answer = await run_in_threadpool(llm_gateway.complete_via_stream, messages, 0.1, 1500, model)
+        except Exception as exc:
+            answer, model = _vision_error(exc), "none (image model unavailable)"
+        return QueryResponse(answer=answer, sources=sources, true_data_chunks=[], noisy_data_chunks=[],
+                             eval_metrics={}, pipeline_steps=["retrieval", "vision"], query_intent="image",
+                             rewritten_query=request.question, hallucination_score=0.0, model_used=model,
+                             latency_ms=int((time.time() - started) * 1000), session_id=session_id,
+                             input_safe=True, output_safe=True)
+
     try:
         from src.graph.pipeline import rag_pipeline
-
-        # Convert Pydantic models to dicts for the pipeline
-        history = [
-            {"role": msg.role, "content": msg.content}
-            for msg in request.conversation_history
-        ]
 
         # Run the LangGraph pipeline
         result = rag_pipeline.run(
@@ -221,6 +273,21 @@ async def query_stream_endpoint(
                                          no_context_answer, unindexed_sources, commit_list_answer,
                                          missing_commit_history)
             from src.gateway.llm_gateway import llm_gateway
+
+            if request.images:
+                # Image questions go to the local vision model, with any matching sources as context.
+                try:
+                    messages, model, sources, true_count = await run_in_threadpool(_vision_inputs, request, history)
+                except ValueError as exc:
+                    yield f"data: {json.dumps({'error': str(exc), 'done': True})}\n\n"
+                    return
+                try:
+                    async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500, model=model):
+                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                except Exception as exc:
+                    yield f"data: {json.dumps({'token': _vision_error(exc), 'done': False})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': sources, 'true_data_count': true_count, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
+                return
 
             # Jira filter questions (who / when / status) are answered by a live JQL search.
             from src.sources.jira_query import answer_jira_question

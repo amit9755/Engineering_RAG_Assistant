@@ -81,7 +81,8 @@ def test_broad_questions_get_overview_even_when_reranker_rejects_everything(vect
     assert [c.document.metadata["file_path"] for c in true] == ["README.md"]
     for q in ["what does this repository do?", "give me an overview", "describe it", "tell me about the repo"]:
         assert is_overview_question(q), q
-    for q in ["how does login work", "explain the auth flow", "what does authController do"]:
+    for q in ["how does login work", "explain the auth flow", "what does authController do",
+              "What does this error mean and how do I fix it?"]:
         assert not is_overview_question(q), q
 
 

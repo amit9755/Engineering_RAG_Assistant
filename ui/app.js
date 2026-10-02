@@ -38,6 +38,7 @@ const state = {
   sourcePollTimer: null,
   progress: {},         // source id -> live indexing progress from /sources/progress
   chatMessages: [],     // this chat's messages with sources, saved to /chats after each answer
+  images: [],           // attached images (resized data URLs) for the next question
   msgCounter: 0,
   sourceStatuses: {},   // id -> last seen status, to announce finished indexing
   pendingDelete: null,  // { type, id, name }
@@ -219,11 +220,12 @@ function handleDragLeave(e) {
 // ============================================================
 async function sendQuery() {
   const input = document.getElementById('queryInput');
-  const question = input.value.trim();
+  const images = state.images.slice();
+  const question = input.value.trim() || (images.length ? 'Describe this image and explain anything important in it.' : '');
   if (!question || state.isLoading) return;
 
   const sourceFilter = getSourceFilter();
-  if (sourceFilter && !sourceFilter.source_ids.length && !sourceFilter.legacy_files.length) {
+  if (!images.length && sourceFilter && !sourceFilter.source_ids.length && !sourceFilter.legacy_files.length) {
     showToast('Select at least one source under "Search In"', 'error');
     return;
   }
@@ -233,13 +235,15 @@ async function sendQuery() {
   if (welcome) welcome.style.display = 'none';
 
   // Add user message to chat
-  addMessage('user', question);
+  addMessage('user', question, { images });
   input.value = '';
   autoResize(input);
+  clearImages();
 
-  // Update conversation history
+  // Update conversation history (saved chats keep a note, not the image itself)
+  const imageNote = images.length ? `\n\n[${images.length} image${images.length > 1 ? 's' : ''} attached]` : '';
   state.conversationHistory.push({ role: 'user', content: question });
-  state.chatMessages.push({ role: 'user', content: question, sources: [] });
+  state.chatMessages.push({ role: 'user', content: question + imageNote, sources: [] });
   document.querySelectorAll('.suggestions').forEach(el => el.remove());
 
   const useStreaming = document.getElementById('streamingMode').checked;
@@ -247,13 +251,13 @@ async function sendQuery() {
   setLoading(true);
 
   if (useStreaming) {
-    await sendStreamingQuery(question, sourceFilter);
+    await sendStreamingQuery(question, sourceFilter, images);
   } else {
-    await sendNormalQuery(question, sourceFilter);
+    await sendNormalQuery(question, sourceFilter, images);
   }
 }
 
-async function sendNormalQuery(question, sourceFilter) {
+async function sendNormalQuery(question, sourceFilter, images = []) {
   // Show typing indicator
   const typingId = addTypingIndicator();
 
@@ -266,6 +270,7 @@ async function sendNormalQuery(question, sourceFilter) {
         session_id: state.sessionId,
         conversation_history: state.conversationHistory.slice(-10), // last 5 turns
         ...(sourceFilter || {}),
+        ...(images.length ? { images } : {}),
       }),
     });
 
@@ -304,7 +309,7 @@ async function sendNormalQuery(question, sourceFilter) {
   }
 }
 
-async function sendStreamingQuery(question, sourceFilter) {
+async function sendStreamingQuery(question, sourceFilter, images = []) {
   // Create an empty assistant message that we'll fill in
   const msgId = addStreamingMessage();
 
@@ -317,6 +322,7 @@ async function sendStreamingQuery(question, sourceFilter) {
         session_id: state.sessionId,
         conversation_history: state.conversationHistory.slice(-10),
         ...(sourceFilter || {}),
+        ...(images.length ? { images } : {}),
       }),
     });
 
@@ -363,6 +369,102 @@ async function sendStreamingQuery(question, sourceFilter) {
     setLoading(false);
   }
 }
+
+// ============================================================
+// IMAGE ATTACHMENTS: attach / paste / drag; resized in the browser
+// ============================================================
+
+const MAX_ATTACHED_IMAGES = 3;
+const MAX_IMAGE_SIDE = 1600;   // smaller images are much faster for a CPU vision model
+
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read the image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function resizeImage(file) {
+  const dataUrl = await readAsDataUrl(file);
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error(`${file.name || 'Image'} is not a supported image`));
+    el.src = dataUrl;
+  });
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.width, img.height));
+  if (scale === 1 && file.size < 1.5 * 1024 * 1024) return dataUrl;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';                       // transparent PNGs -> white background
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.9);
+}
+
+async function addImages(files) {
+  for (const file of files) {
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+      showToast(`${file.name || 'File'}: only PNG, JPEG, WebP or GIF images`, 'error');
+      continue;
+    }
+    if (state.images.length >= MAX_ATTACHED_IMAGES) {
+      showToast(`You can attach up to ${MAX_ATTACHED_IMAGES} images`, 'error');
+      break;
+    }
+    try {
+      state.images.push(await resizeImage(file));
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  }
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const box = document.getElementById('attachPreview');
+  box.style.display = state.images.length ? 'flex' : 'none';
+  box.innerHTML = state.images.map((src, i) => `
+    <div class="attach-thumb">
+      <img src="${src}" alt="attached image ${i + 1}" />
+      <button title="Remove" data-remove-image="${i}">&times;</button>
+    </div>`).join('') + (state.images.length
+      ? '<span class="attach-hint">Ask about the image, or press Enter to have it described</span>' : '');
+  box.querySelectorAll('[data-remove-image]').forEach(button => button.addEventListener('click', () => {
+    state.images.splice(Number(button.dataset.removeImage), 1);
+    renderAttachments();
+  }));
+}
+
+function clearImages() {
+  state.images = [];
+  renderAttachments();
+}
+
+function handleImageSelect(event) {
+  addImages(Array.from(event.target.files));
+  event.target.value = '';
+}
+
+function handleImageDrop(event) {
+  event.preventDefault();
+  addImages(Array.from(event.dataTransfer.files || []));
+}
+
+document.addEventListener('paste', event => {
+  if (!document.getElementById('panel-chat').classList.contains('active')) return;
+  const files = Array.from(event.clipboardData?.items || [])
+    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile()).filter(Boolean);
+  if (files.length) {
+    event.preventDefault();
+    addImages(files);
+  }
+});
 
 // ============================================================
 // AFTER EACH ANSWER: save the chat, then suggest follow-up questions
@@ -542,7 +644,8 @@ function addMessage(role, content, meta = {}) {
   div.innerHTML = `
     <div class="message-avatar">${avatar}</div>
     <div class="message-content">
-      <div class="message-bubble">${formatMessageContent(content)}</div>
+      <div class="message-bubble">${(meta.images || []).map(src =>
+        `<img class="message-image" src="${src}" alt="attached image" />`).join('')}${formatMessageContent(content)}</div>
       ${sourcesHtml}
       ${metaHtml}
     </div>`;

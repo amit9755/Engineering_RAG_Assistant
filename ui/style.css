@@ -1093,3 +1093,20 @@ body {
 body.role-user .admin-only,
 body.role-user .source-card-actions,
 body.role-user #uploadAreaSources { display: none !important; }
+
+/* ===== Image attachments ===== */
+.btn-attach {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary);
+  font-size: 17px; width: 40px; flex-shrink: 0; cursor: pointer;
+}
+.btn-attach:hover { border-color: var(--accent); color: var(--accent); }
+.attach-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.attach-thumb { position: relative; }
+.attach-thumb img { height: 64px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.attach-thumb button {
+  position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; border-radius: 50%; border: none;
+  background: var(--accent-red); color: #fff; font-size: 13px; line-height: 20px; cursor: pointer; padding: 0;
+}
+.attach-hint { font-size: 12px; color: var(--text-muted); }
+.message-image { display: block; max-width: 320px; max-height: 240px; border-radius: 6px; margin-bottom: 8px;
+  border: 1px solid var(--border); }

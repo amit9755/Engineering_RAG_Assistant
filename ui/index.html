@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=auth-20261003" />
+  <link rel="stylesheet" href="/static/style.css?v=vision-20261003" />
 </head>
 <body>
 
@@ -148,12 +148,17 @@
         <div class="messages-container" id="messagesContainer"></div>
 
         <!-- Input area -->
-        <div class="input-area">
+        <div class="input-area" ondragover="event.preventDefault()" ondrop="handleImageDrop(event)">
+          <div class="attach-preview" id="attachPreview" style="display:none"></div>
           <div class="input-wrapper">
+            <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple
+                   style="display:none" onchange="handleImageSelect(event)" />
+            <button class="btn-attach" onclick="document.getElementById('imageInput').click()"
+                    title="Attach an image (or paste / drag one here)">&#128206;</button>
             <textarea
               id="queryInput"
               class="query-input"
-              placeholder="Ask a question about your selected sources..."
+              placeholder="Ask a question about your selected sources... (paste or attach an image to ask about it)"
               rows="1"
               onkeydown="handleKeyDown(event)"
               oninput="autoResize(this)"
@@ -568,6 +573,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=auth-20261003"></script>
+<script src="/static/app.js?v=vision-20261003"></script>
 </body>
 </html>

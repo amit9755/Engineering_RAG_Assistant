@@ -244,7 +244,14 @@ def is_overview_question(text: str) -> bool:
     text = (text or "").strip()
     if _OVERVIEW_STRONG.search(text):
         return True
-    return bool(_OVERVIEW_WEAK.search(text) and _OVERVIEW_OBJECT.search(text))
+    if not _OVERVIEW_WEAK.search(text):
+        return False
+    match = _OVERVIEW_OBJECT.search(text)
+    if not match:
+        return False
+    # "explain this" / "describe it" are broad only when that is the whole question;
+    # "how do I fix it?" ends in "it" but is about something specific.
+    return bool(match.group(2)) or len(text.split()) <= 5
 
 
 def split_questions(text: str) -> List[str]:

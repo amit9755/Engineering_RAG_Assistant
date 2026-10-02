@@ -188,6 +188,18 @@ and Markdown up to 50 MB each. Legacy `.doc` files should be saved as `.docx`.
 Files uploaded before document management appear under **Older uploads** with a
 text preview; they stay searchable and can be removed, but not reindexed.
 
+### Asking about images
+
+Attach a screenshot, error dialog or diagram to a chat message with the 📎
+button, by pasting it (Ctrl+V / Cmd+V) or by dragging it onto the chat box (up
+to 3 images; they are resized in the browser). A local vision model reads the
+image; the text it reads (errors, file paths, function names) is also used to
+search your repositories, Jira and Confluence, so the answer can point to the
+relevant code. Install the model once with `ollama pull gemma3:4b` (about
+3.3 GB; change it with `OLLAMA_VISION_MODEL`). Saved chats note that an image
+was attached but do not store it. Expect roughly 5-30 s per image question on
+a GPU and longer on a CPU-only PC.
+
 ### Accounts and sign-in
 
 The app requires signing in. On the first start the server creates two admin
