@@ -109,8 +109,40 @@ The default `.env` uses:
 
 ### Step 3: Start the Server
 
-If `.env` sets `OLLAMA_MODEL=llama3.2`, start the local model service first.
-On macOS, install Ollama once with `brew install ollama`, then run:
+If `.env` sets `OLLAMA_MODEL=llama3.2`, install and start the local model
+service first. Leave `GEMINI_API_KEY` and `OPENAI_API_KEY` empty in `.env`:
+any non-empty value makes the app use that provider instead of Ollama.
+
+**Install Ollama once** (the installer is not stored in this repository):
+
+| OS | Install |
+|---|---|
+| macOS | `brew install ollama`, or the app from https://ollama.com/download |
+| Windows | Run `OllamaSetup.exe` from https://ollama.com/download, or `winget install Ollama.Ollama` |
+| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
+
+On Windows, the installed app runs the Ollama service in the background, so
+skip `ollama serve` below. On Linux, the install script registers a systemd
+service; if `ollama list` fails, start it with `sudo systemctl start ollama`
+or run `ollama serve` in a terminal.
+
+Download the model once and check it is available:
+
+```bash
+ollama pull llama3.2
+ollama list        # should show llama3.2
+```
+
+Download the embedding and re-ranking models once (the server runs offline):
+
+```bash
+# macOS/Linux (use your virtual environment's python, e.g. .venv/bin/python on Linux)
+.venv-macos/bin/python download_model.py
+# Windows
+.venv\Scripts\python.exe download_model.py
+```
+
+Then start the services (macOS shown):
 
 ```bash
 # Terminal 1: keep the model service running
@@ -118,9 +150,15 @@ ollama serve
 ```
 
 ```bash
-# Terminal 2: download the model once, then start the app
-ollama pull llama3.2
+# Terminal 2: start the app
 .venv-macos/bin/python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+```
+
+On Linux, use your virtual environment's Python the same way (for example
+`.venv/bin/python -m uvicorn ...`). On Windows (PowerShell):
+
+```powershell
+.venv\Scripts\python.exe -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 ```
 
 `.venv-macos` is the macOS environment created for this checkout. If using
