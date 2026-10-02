@@ -69,12 +69,13 @@ class BitbucketSourceConfig(BaseModel):
     The actual token is NEVER stored here.
     """
     source_id: str
-    workspace: str
+    workspace: str                      # Cloud: workspace slug. Server: project key
     repository: str
     branch: str = "main"
     credential_id: str
     last_commit: Optional[str] = None   # last indexed commit hash
     file_count: int = 0
+    server_url: Optional[str] = None    # None = Bitbucket Cloud; else Bitbucket Server / Data Center base URL
 
 
 class JiraSourceConfig(BaseModel):
@@ -137,6 +138,7 @@ class BitbucketSourceResponse(SourceResponse):
     branch: str
     last_commit: Optional[str]
     file_count: int
+    server_url: Optional[str] = None
     credential_configured: bool = True  # always true; never returns token
 
 
@@ -154,18 +156,21 @@ class JiraSourceResponse(SourceResponse):
 
 class AddBitbucketSourceRequest(BaseModel):
     """Request to add a Bitbucket source. Token provided once, then stored encrypted."""
-    workspace: str = Field(description="Bitbucket workspace slug")
+    workspace: str = Field(description="Cloud: workspace slug. Server / Data Center: project key")
     repository: str = Field(description="Repository slug")
     branch: str = Field(default="main")
-    username: str = Field(description="Bitbucket username or email")
-    token: str = Field(description="App password or access token")
+    username: str = Field(default="", description="Cloud: account email. Server: optional with an HTTP access token")
+    token: str = Field(description="Cloud: API token / app password. Server: HTTP access token")
     name: Optional[str] = None  # display name; defaults to workspace/repository
+    server_url: Optional[str] = Field(default=None, description="Bitbucket Server / Data Center URL; omit for Cloud")
 
 
 class TestBitbucketRequest(BaseModel):
     workspace: str
-    username: str
+    username: str = ""
     token: str
+    server_url: Optional[str] = None
+    repository: Optional[str] = None
 
 
 class AddJiraSourceRequest(BaseModel):

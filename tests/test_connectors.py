@@ -38,11 +38,11 @@ class FakeCredentials:
         return "me@example.com:secret-token"
 
 
-def repo_zip(files):
+def repo_zip(files, prefix="ws-repo-abc123/"):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         for path, content in files.items():
-            zf.writestr(f"ws-repo-abc123/{path}", content)
+            zf.writestr(f"{prefix}{path}", content)
     return buffer.getvalue()
 
 
@@ -58,8 +58,9 @@ class FakeBitbucket:
         self.files, self.branches, self.default = files, branches or {"main": "c" * 40}, default
         self.downloads = 0
 
-    def __call__(self, username, token):
+    def __call__(self, username, token, server_url=None):
         assert (username, token) == ("me@example.com", "secret-token")
+        self.server_url = server_url
         return self
 
     def get_branch_commit(self, workspace, repository, branch):
@@ -402,3 +403,100 @@ def test_stream_answers_without_llm_when_nothing_is_retrieved(api, monkeypatch):
     assert not called
     assert "nothing to search yet" in events[0]["token"]
     assert events[-1]["sources"] == []
+
+
+# ---------------------------------------------------------------- bitbucket server / data center
+
+from src.sources.bitbucket_indexer import BitbucketServerClient, make_client, parse_server_url
+
+SERVER = "https://bitbucket.example.com"
+
+
+def test_parse_server_url_accepts_base_or_repository_page():
+    assert parse_server_url("https://bitbucket.example.com/projects/WSQAAUTO/repos/my_repo/browse") == (
+        SERVER, "WSQAAUTO", "my_repo")
+    assert parse_server_url("https://bitbucket.example.com/") == (SERVER, None, None)
+    assert parse_server_url("https://host/bitbucket/projects/ABC") == ("https://host/bitbucket", "ABC", None)
+    with pytest.raises(ValueError):
+        parse_server_url("bitbucket.example.com")
+    assert isinstance(make_client("", "t", server_url=SERVER), BitbucketServerClient)
+
+
+class FakeServerSession:
+    """Answers Bitbucket Server REST 1.0 calls for project WSQ, repository app."""
+
+    def __init__(self, archive=b"", token="good"):
+        self.archive, self.token, self.calls = archive, token, []
+
+    def get(self, url, headers=None, auth=None, params=None, timeout=None, stream=False):
+        self.calls.append((url, params, headers, auth))
+        bearer = (headers or {}).get("Authorization") == f"Bearer {self.token}"
+        if not bearer:
+            return response(401)
+        api = f"{SERVER}/rest/api/1.0/projects/WSQ"
+        routes = {
+            f"{api}/repos": {"size": 3, "values": []},
+            f"{api}/repos/app": {"slug": "app"},
+            f"{api}/repos/app/default-branch": {"displayId": "master"},
+            f"{api}/repos/app/branches": {"values": [
+                {"id": "refs/heads/master", "displayId": "master", "latestCommit": "f" * 40},
+                {"id": "refs/heads/main-old", "displayId": "main-old", "latestCommit": "0" * 40}]},
+        }
+        if url == f"{api}/repos/app/archive":
+            r = response(200)
+            r.iter_content = lambda size: [self.archive]
+            return r
+        return response(200, routes[url]) if url in routes else response(404)
+
+
+def test_server_client_tests_connection_and_resolves_default_branch(registry):
+    session = FakeServerSession()
+    client = BitbucketServerClient("", "good", SERVER + "/", session)
+    assert client.test_connection("WSQ", "app") == 3
+    assert session.calls[0][2]["Authorization"] == "Bearer good"
+    assert client.get_branch_commit("WSQ", "app", "main") is None  # filterText match must be exact
+    add_repo(registry)
+    registry.update_bitbucket_config("bb-1", workspace="WSQ", repository="app")
+    assert resolve_branch(client, registry.get_bitbucket_config("bb-1")) == ("master", "f" * 40)
+
+
+def test_server_client_reports_readable_errors():
+    with pytest.raises(IndexingError, match="HTTP access token"):
+        BitbucketServerClient("", "bad", SERVER, FakeServerSession()).test_connection("WSQ")
+    with pytest.raises(IndexingError, match="project KEY"):
+        BitbucketServerClient("", "good", SERVER, FakeServerSession()).test_connection("NOPE")
+
+
+def test_server_repository_is_indexed_with_server_links(registry, vectors):
+    archive = repo_zip({"src/main.py": "def run():\n    return 1\n"}, prefix="app/")
+    session = FakeServerSession(archive=archive)
+    registry.create_bitbucket_source(
+        BitbucketSourceConfig(source_id="bb-s", workspace="WSQ", repository="app", branch="master",
+                              credential_id="cred", server_url=SERVER), name="WSQ/app")
+    indexer = BitbucketIndexer(registry=registry, credentials=FakeCredentials(), vector_store=vectors,
+                               refresh=Mock(),
+                               client_factory=lambda u, t, server_url=None: BitbucketServerClient(
+                                   u, t.replace("secret-token", "good"), server_url, session))
+    IndexJobRunner(registry).start("bb-s", indexer.index, background=False)
+    source = registry.get_source("bb-s")
+    assert source.status == SourceStatus.READY, source.error_message
+    archive_call = next(c for c in session.calls if c[0].endswith("/archive"))
+    assert archive_call[1] == {"at": "f" * 40, "format": "zip", "prefix": "app/"}
+    meta = next(m for m in vectors._store._collection.get()["metadatas"] if m["file_path"] == "src/main.py")
+    assert meta["source_file"] == "WSQ/app/src/main.py"
+    assert meta["url"] == f"{SERVER}/projects/WSQ/repos/app/browse/src/main.py?at={'f' * 40}"
+    assert registry.get_bitbucket_config("bb-s").server_url == SERVER
+
+
+def test_add_server_repository_from_pasted_url(api, registry, monkeypatch):
+    import src.api.routes.sources.bitbucket as bb_routes
+    monkeypatch.setattr(bb_routes.credential_store, "store", lambda **kw: "cred-x")
+    r = api.post("/api/v1/sources/bitbucket", json={
+        "server_url": f"{SERVER}/projects/WSQAAUTO/repos/wireless_centralized_server_gen2/browse",
+        "workspace": "", "repository": "", "token": "t"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["server_url"], body["workspace"], body["repository"]) == (
+        SERVER, "WSQAAUTO", "wireless_centralized_server_gen2")
+    assert api.post("/api/v1/sources/bitbucket", json={
+        "server_url": "http://insecure", "workspace": "A", "repository": "b", "token": "t"}).status_code == 422

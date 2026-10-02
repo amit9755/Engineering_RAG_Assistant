@@ -56,54 +56,49 @@ class TestConnectionResponse(BaseModel):
     repos_found: Optional[int] = None
 
 
+def _normalize_target(server_url, workspace, repository):
+    """
+    Returns (server_url or None, workspace/project, repository). A pasted Bitbucket
+    Server repository URL fills in a missing project key and repository.
+    """
+    from src.sources.bitbucket_indexer import parse_server_url
+    workspace, repository = (workspace or "").strip(), (repository or "").strip()
+    if not (server_url or "").strip():
+        return None, workspace, repository
+    try:
+        base, project, repo = parse_server_url(server_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return base, (workspace or project or ""), (repository or repo or "")
+
+
 @router.post("/test", response_model=TestConnectionResponse, summary="Test Bitbucket connection")
 async def test_bitbucket_connection(request: TestBitbucketRequest):
     """
-    Test a Bitbucket connection using provided credentials.
-    Returns success/failure without storing any credentials.
-
-    Phase 1: Basic HTTP test against Bitbucket API.
-    Phase 3: Returns full repository list for dynamic dropdown.
+    Test Bitbucket Cloud or Bitbucket Server / Data Center credentials without
+    storing them. Uses the same client as indexing, so a passing test means
+    indexing can reach the repository.
     """
+    from starlette.concurrency import run_in_threadpool
+    from src.sources.bitbucket_indexer import make_client
+    from src.sources.jobs import IndexingError
+
+    server_url, workspace, repository = _normalize_target(request.server_url, request.workspace,
+                                                          request.repository)
+    if not workspace:
+        return TestConnectionResponse(success=False, message=(
+            "Enter the project key (e.g. WSQAAUTO)" if server_url else "Enter the workspace"))
     try:
-        import requests as http_requests
-        from requests.auth import HTTPBasicAuth
-
-        auth = HTTPBasicAuth(request.username, request.token)
-        url = f"https://api.bitbucket.org/2.0/repositories/{request.workspace}"
-        response = http_requests.get(url, auth=auth, timeout=10)
-
-        if response.status_code == 200:
-            data = response.json()
-            repo_count = data.get("size", 0)
-            return TestConnectionResponse(
-                success=True,
-                message="Connection successful",
-                workspace=request.workspace,
-                repos_found=repo_count,
-            )
-        elif response.status_code == 401:
-            return TestConnectionResponse(
-                success=False,
-                message="Authentication failed: invalid username or token",
-            )
-        elif response.status_code == 404:
-            return TestConnectionResponse(
-                success=False,
-                message=f"Workspace '{request.workspace}' not found",
-            )
-        else:
-            return TestConnectionResponse(
-                success=False,
-                message=f"Bitbucket returned status {response.status_code}",
-            )
-
+        client = make_client(request.username.strip(), request.token, server_url=server_url)
+        repos = await run_in_threadpool(client.test_connection, workspace, repository or None)
+        target = f"{workspace}/{repository}" if repository else workspace
+        return TestConnectionResponse(success=True, message=f"Connection successful: {target}",
+                                      workspace=workspace, repos_found=repos)
+    except IndexingError as exc:
+        return TestConnectionResponse(success=False, message=str(exc))
     except Exception as exc:
         logger.warning("bitbucket_connection_test_failed", error=str(exc))
-        return TestConnectionResponse(
-            success=False,
-            message=f"Connection error: {str(exc)}",
-        )
+        return TestConnectionResponse(success=False, message=f"Connection error: {exc.__class__.__name__}")
 
 
 # ============================================================
@@ -150,6 +145,11 @@ async def add_bitbucket_source(request: AddBitbucketSourceRequest):
 
     After adding, call POST /{source_id}/index to index the repository.
     """
+    server_url, request.workspace, request.repository = _normalize_target(
+        request.server_url, request.workspace, request.repository)
+    if not request.workspace or not request.repository or not request.token:
+        raise HTTPException(status_code=422, detail="Workspace / project key, repository and token are required")
+
     # Generate a unique source ID
     source_id = f"bb-{uuid.uuid4().hex[:8]}"
 
@@ -170,6 +170,7 @@ async def add_bitbucket_source(request: AddBitbucketSourceRequest):
         repository=request.repository,
         branch=request.branch,
         credential_id=credential_id,
+        server_url=server_url,
     )
 
     source = source_registry.create_bitbucket_source(config, name=name)
@@ -187,6 +188,7 @@ async def add_bitbucket_source(request: AddBitbucketSourceRequest):
         branch=request.branch,
         last_commit=None,
         file_count=0,
+        server_url=server_url,
         credential_configured=True,
     )
 
@@ -219,6 +221,7 @@ async def get_bitbucket_source(source_id: str):
         branch=cfg.branch,
         last_commit=cfg.last_commit,
         file_count=cfg.file_count,
+        server_url=cfg.server_url,
         credential_configured=True,
     )
 
@@ -245,7 +248,13 @@ async def update_bitbucket_source(source_id: str, request: UpdateBitbucketSource
 
     # If a new token is provided, update the credential
     if request.token and request.token.strip():
-        username = request.username or cfg.workspace  # fallback
+        # Keep the saved username when only the token is being replaced.
+        username = request.username
+        if username is None:
+            try:
+                username = credential_store.retrieve(cfg.credential_id).split(":", 1)[0]
+            except KeyError:
+                username = ""
         credential_store.update(
             cfg.credential_id,
             plaintext_token=f"{username}:{request.token}",
@@ -271,6 +280,7 @@ async def update_bitbucket_source(source_id: str, request: UpdateBitbucketSource
         branch=updated_cfg.branch,
         last_commit=updated_cfg.last_commit,
         file_count=updated_cfg.file_count,
+        server_url=updated_cfg.server_url,
         credential_configured=True,
     )
 

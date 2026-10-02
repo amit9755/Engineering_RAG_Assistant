@@ -94,9 +94,25 @@ def is_indexable(path: str, size: int) -> bool:
 
 
 class BitbucketClient:
+    """Bitbucket Cloud (bitbucket.org): workspace / repository, email + API token."""
+
     def __init__(self, username: str, token: str, session=None):
         self.auth = (username, token)
         self.http = session or requests.Session()
+
+    def test_connection(self, workspace, repository=None) -> int:
+        """Raise IndexingError with a readable message, else return the number of visible repositories."""
+        response = self._get(f"{API_BASE}/repositories/{workspace}")
+        if response.status_code == 404:
+            raise IndexingError(f"Workspace '{workspace}' not found")
+        response.raise_for_status()
+        if repository:
+            self.get_repository(workspace, repository)
+        return response.json().get("size", 0)
+
+    def file_url(self, workspace, repository, commit, path=None):
+        base = f"{WEB_BASE}/{workspace}/{repository}"
+        return f"{base}/src/{commit}/{path}" if path else base
 
     def _get(self, url, **kwargs):
         try:
@@ -130,15 +146,139 @@ class BitbucketClient:
         response = self._get(url, stream=True, timeout=120)
         if response.status_code != 200:
             raise IndexingError(f"Downloading the repository archive failed (HTTP {response.status_code}).")
-        with tempfile.SpooledTemporaryFile(max_size=50 * 1024 * 1024) as buffer:
-            total = 0
-            for block in response.iter_content(1024 * 1024):
-                total += len(block)
-                if total > MAX_ARCHIVE_BYTES:
-                    raise IndexingError("Repository archive exceeds 300 MB; it is too large to index locally.")
-                buffer.write(block)
-            buffer.seek(0)
-            return buffer.read()
+        return _read_limited(response)
+
+
+class BitbucketServerClient:
+    """
+    Bitbucket Server / Data Center (self-hosted, e.g. https://bitbucket.company.com):
+    project key / repository, REST API 1.0, HTTP access token sent as a Bearer token.
+    If the token is rejected and a username was given, Basic auth is tried instead
+    (older servers accept username + token or password that way).
+    """
+
+    def __init__(self, username: str, token: str, server_url: str, session=None):
+        self.base = server_url.rstrip("/")
+        self.username, self.token = username, token
+        self.http = session or requests.Session()
+
+    def _api(self, project, repository=None, suffix=""):
+        url = f"{self.base}/rest/api/1.0/projects/{quote(project, safe='')}"
+        if repository:
+            url += f"/repos/{quote(repository, safe='')}"
+        return url + suffix
+
+    def _get(self, url, **kwargs):
+        timeout = kwargs.pop("timeout", 30)
+        try:
+            response = self.http.get(url, headers={"Authorization": f"Bearer {self.token}",
+                                                   "Accept": "application/json"},
+                                     timeout=timeout, **kwargs)
+            if response.status_code == 401 and self.username:
+                response = self.http.get(url, auth=(self.username, self.token), timeout=timeout, **kwargs)
+        except requests.exceptions.SSLError as exc:
+            raise IndexingError(f"SSL certificate check failed for {self.base}. On a company network, install "
+                                "pip-system-certs in the app's Python environment so it trusts the company "
+                                "certificate.") from exc
+        except requests.RequestException as exc:
+            raise IndexingError(f"Could not reach {self.base}: {exc.__class__.__name__}. "
+                                "Check the URL and that you are on the company network or VPN.") from exc
+        if response.status_code == 401:
+            raise IndexingError("Bitbucket Server rejected the token. Use an HTTP access token "
+                                "(Profile > Manage account > HTTP access tokens) with Repository read permission.")
+        if response.status_code == 403:
+            raise IndexingError("The token lacks permission to read this project or repository "
+                                "(it needs Repository read).")
+        return response
+
+    def test_connection(self, project, repository=None) -> int:
+        response = self._get(self._api(project, suffix="/repos"), params={"limit": 100})
+        if response.status_code == 404:
+            raise IndexingError(f"Project '{project}' not found on {self.base} (use the project KEY, e.g. WSQAAUTO).")
+        response.raise_for_status()
+        if repository:
+            self.get_repository(project, repository)
+        return response.json().get("size", 0)
+
+    def get_repository(self, project, repository):
+        response = self._get(self._api(project, repository))
+        if response.status_code == 404:
+            raise IndexingError(f"Repository {project}/{repository} was not found or is not visible to this token.")
+        response.raise_for_status()
+        repo = response.json()
+        default = self._default_branch(project, repository)
+        repo["mainbranch"] = {"name": default} if default else None
+        return repo
+
+    def _default_branch(self, project, repository):
+        for suffix in ("/default-branch", "/branches/default"):  # newer, then older servers
+            response = self._get(self._api(project, repository, suffix))
+            if response.status_code == 200:
+                return response.json().get("displayId")
+        return None
+
+    def get_branch_commit(self, project, repository, branch):
+        response = self._get(self._api(project, repository, "/branches"),
+                             params={"filterText": branch, "limit": 100})
+        if response.status_code == 404:
+            raise IndexingError(f"Repository {project}/{repository} was not found or is not visible to this token.")
+        response.raise_for_status()
+        for ref in response.json().get("values", []):
+            if ref.get("displayId") == branch or ref.get("id") == f"refs/heads/{branch}":
+                return ref.get("latestCommit")
+        return None
+
+    def download_archive(self, project, repository, commit) -> bytes:
+        # prefix gives entries the same "<folder>/" layout as Bitbucket Cloud archives.
+        response = self._get(self._api(project, repository, "/archive"),
+                             params={"at": commit, "format": "zip", "prefix": f"{repository}/"},
+                             stream=True, timeout=300)
+        if response.status_code != 200:
+            raise IndexingError(f"Downloading the repository archive failed (HTTP {response.status_code}).")
+        return _read_limited(response)
+
+    def file_url(self, project, repository, commit, path=None):
+        base = f"{self.base}/projects/{project}/repos/{repository}/browse"
+        return f"{base}/{path}?at={commit}" if path else base
+
+
+def _read_limited(response) -> bytes:
+    with tempfile.SpooledTemporaryFile(max_size=50 * 1024 * 1024) as buffer:
+        total = 0
+        for block in response.iter_content(1024 * 1024):
+            total += len(block)
+            if total > MAX_ARCHIVE_BYTES:
+                raise IndexingError("Repository archive exceeds 300 MB; it is too large to index locally.")
+            buffer.write(block)
+        buffer.seek(0)
+        return buffer.read()
+
+
+def make_client(username: str, token: str, server_url: str = None):
+    """Bitbucket Cloud client, or a Bitbucket Server / Data Center client when server_url is set."""
+    if server_url:
+        return BitbucketServerClient(username, token, server_url)
+    return BitbucketClient(username, token)
+
+
+def parse_server_url(url: str):
+    """
+    Accept a server base URL or any repository page URL and return
+    (base_url, project_key or None, repository or None), e.g.
+    https://bitbucket.sw.nxp.com/projects/WSQAAUTO/repos/wireless_centralized_server_gen2/browse
+    -> ("https://bitbucket.sw.nxp.com", "WSQAAUTO", "wireless_centralized_server_gen2").
+    """
+    import re
+    url = (url or "").strip()
+    if not re.match(r"^https://[^/\s]+", url, re.I):
+        raise ValueError("Bitbucket Server URL must start with https://")
+    match = re.match(r"^(https://.+?)/(?:projects|users)/([^/]+)/repos/([^/?#]+)", url, re.I)
+    if match:
+        return match.group(1).rstrip("/"), match.group(2), match.group(3)
+    match = re.match(r"^(https://.+?)/projects/([^/?#]+)", url, re.I)
+    if match:
+        return match.group(1).rstrip("/"), match.group(2), None
+    return re.split(r"[?#]", url)[0].rstrip("/"), None, None
 
 
 def resolve_branch(client, cfg):
@@ -157,15 +297,17 @@ def resolve_branch(client, cfg):
     return default, commit
 
 
-def build_documents(archive: bytes, source, cfg, branch, commit):
+def build_documents(archive: bytes, source, cfg, branch, commit, file_url=None):
     """Turn a repository zip archive into chunk Documents. Returns (documents, file_count)."""
+    file_url = file_url or BitbucketClient("", "").file_url
     repo_name = f"{cfg.workspace}/{cfg.repository}"
     documents, paths = [], []
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         for info in zf.infolist():
             if info.is_dir():
                 continue
-            # Archive entries are prefixed with a "<workspace>-<repo>-<hash>/" folder.
+            # Archive entries are prefixed with one folder ("<workspace>-<repo>-<hash>/" on
+            # Cloud, "<repo>/" on Server via the prefix parameter).
             path = "/".join(info.filename.split("/")[1:])
             if not is_indexable(path, info.file_size):
                 continue
@@ -187,7 +329,8 @@ def build_documents(archive: bytes, source, cfg, branch, commit):
             chunks = _splitter.split_text(text)
             for index, chunk in enumerate(chunks):
                 documents.append(_document(header + chunk, source, cfg, branch, commit, path, index, len(chunks),
-                                           LANGUAGES.get(suffix, suffix.lstrip(".") or "text")))
+                                           LANGUAGES.get(suffix, suffix.lstrip(".") or "text"),
+                                           file_url(cfg.workspace, cfg.repository, commit, path)))
 
     if not paths:
         raise IndexingError("No readable source files were found in this branch.")
@@ -199,11 +342,12 @@ def build_documents(archive: bytes, source, cfg, branch, commit):
                                                  separators=["\n"]).split_text(tree)
     for index, chunk in enumerate(tree_chunks):
         documents.append(_document(overview + chunk, source, cfg, branch, commit,
-                                   "(file tree)", index, len(tree_chunks), "text"))
+                                   "(file tree)", index, len(tree_chunks), "text",
+                                   file_url(cfg.workspace, cfg.repository, commit)))
     return documents, len(paths)
 
 
-def _document(text, source, cfg, branch, commit, path, index, total, language):
+def _document(text, source, cfg, branch, commit, path, index, total, language, url):
     repo_name = f"{cfg.workspace}/{cfg.repository}"
     return Document(page_content=text, metadata={
         "source_id": source.id,
@@ -218,7 +362,7 @@ def _document(text, source, cfg, branch, commit, path, index, total, language):
         "chunk_index": index,
         "total_chunks": total,
         "chunk_id": f"{source.id}:{path}:{index}",
-        "url": f"{WEB_BASE}/{repo_name}/src/{commit}/{path}" if path != "(file tree)" else f"{WEB_BASE}/{repo_name}",
+        "url": url,
     })
 
 
@@ -228,7 +372,7 @@ class BitbucketIndexer:
         self.credentials = credentials if credentials is not None else credential_store
         self._vector_store = vector_store
         self._refresh = refresh
-        self.client_factory = client_factory or BitbucketClient
+        self.client_factory = client_factory or make_client
 
     @property
     def vectors(self):
@@ -249,7 +393,7 @@ class BitbucketIndexer:
             username, token = self.credentials.retrieve(cfg.credential_id).split(":", 1)
         except (KeyError, ValueError) as exc:
             raise IndexingError("Saved Bitbucket credentials are missing. Delete and re-add the repository.") from exc
-        return self.client_factory(username, token)
+        return self.client_factory(username, token, server_url=cfg.server_url)
 
     def sync(self, source_id: str) -> int:
         """Re-index only if the branch has new commits; otherwise keep the existing chunks."""
@@ -273,7 +417,8 @@ class BitbucketIndexer:
         branch, commit = resolve_branch(client, cfg)
         logger.info("bitbucket_index_start", source_id=source_id, branch=branch, commit=commit[:12])
         archive = client.download_archive(cfg.workspace, cfg.repository, commit)
-        documents, file_count = build_documents(archive, source, cfg, branch, commit)
+        documents, file_count = build_documents(archive, source, cfg, branch, commit,
+                                               getattr(client, "file_url", None))
         self.vectors.replace_source_documents(source_id, documents)
         self.refresh_search()
         self.registry.update_bitbucket_config(source_id, branch=branch, last_commit=commit, file_count=file_count)

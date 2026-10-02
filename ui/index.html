@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=theme-20261002" />
+  <link rel="stylesheet" href="/static/style.css?v=bbserver-20261002" />
 </head>
 <body>
 
@@ -347,8 +347,22 @@
     </div>
     <div class="modal-body">
       <div class="form-group">
-        <label class="field-label">Bitbucket URL / Workspace</label>
-        <input type="text" id="bbWorkspace" class="form-input" placeholder="my-workspace" />
+        <label class="field-label">Bitbucket type</label>
+        <select id="bbType" class="form-input" onchange="updateBitbucketForm()">
+          <option value="server">Bitbucket Server / Data Center (company-hosted)</option>
+          <option value="cloud">Bitbucket Cloud (bitbucket.org)</option>
+        </select>
+      </div>
+      <div class="form-group" id="bbServerUrlGroup">
+        <label class="field-label">Server URL or repository link</label>
+        <input type="text" id="bbServerUrl" class="form-input"
+               placeholder="https://bitbucket.company.com/projects/KEY/repos/repo/browse"
+               oninput="fillFromServerUrl()" autocomplete="url" />
+        <small class="field-hint">Paste the repository page link to fill in the project key and repository.</small>
+      </div>
+      <div class="form-group">
+        <label class="field-label" id="bbWorkspaceLabel">Project key</label>
+        <input type="text" id="bbWorkspace" class="form-input" placeholder="PROJECTKEY" />
       </div>
       <div class="form-group">
         <label class="field-label">Repository</label>
@@ -359,12 +373,13 @@
         <input type="text" id="bbBranch" class="form-input" value="main" />
       </div>
       <div class="form-group">
-        <label class="field-label">Username / Email</label>
+        <label class="field-label" id="bbUsernameLabel">Username (optional)</label>
         <input type="text" id="bbUsername" class="form-input" placeholder="username@company.com" autocomplete="username" />
       </div>
       <div class="form-group">
-        <label class="field-label">Access Token / App Password</label>
+        <label class="field-label" id="bbTokenLabel">HTTP access token</label>
         <input type="password" id="bbToken" class="form-input" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password" />
+        <small class="field-hint" id="bbTokenHint"></small>
         <small class="field-hint">Token is encrypted before storage. It will not be displayed again.</small>
       </div>
       <div id="bbTestResult" class="connection-result" style="display:none"></div>
@@ -428,6 +443,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=theme-20261002"></script>
+<script src="/static/app.js?v=bbserver-20261002"></script>
 </body>
 </html>

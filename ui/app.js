@@ -901,6 +901,7 @@ function renderBitbucketList() {
           <div class="source-card-meta">
             <span class="source-badge ${statusCls}">${repo.status}</span>
             <span>&#127807; ${escapeHtml(repo.branch)}</span>
+            <span>${repo.server_url ? escapeHtml(new URL(repo.server_url).host) : 'bitbucket.org'}</span>
             ${repo.file_count ? `<span>${repo.file_count} files</span>` : ''}
             ${repo.chunk_count ? `<span>${repo.chunk_count} chunks</span>` : ''}
             <span class="cred-badge">&#128274; Token configured</span>
@@ -1041,7 +1042,7 @@ function getSourceFilter() {
 // ============================================================
 
 function showAddBitbucketModal() {
-  // Reset form
+  // Reset form (keep the last chosen type and server URL for convenience)
   ['bbWorkspace', 'bbRepository', 'bbUsername', 'bbToken'].forEach(id => {
     document.getElementById(id).value = '';
   });
@@ -1049,17 +1050,67 @@ function showAddBitbucketModal() {
   document.getElementById('bbTestResult').style.display = 'none';
   document.getElementById('bbAddBtn').disabled = true;
   state.bbConnectionTested = false;
+  updateBitbucketForm();
   document.getElementById('modalBitbucket').style.display = 'flex';
 }
 
-async function testBitbucketConnection() {
-  const workspace = document.getElementById('bbWorkspace').value.trim();
-  const username = document.getElementById('bbUsername').value.trim();
-  const token = document.getElementById('bbToken').value;
-  const resultEl = document.getElementById('bbTestResult');
+function isBitbucketServer() {
+  return document.getElementById('bbType').value === 'server';
+}
 
-  if (!workspace || !username || !token) {
-    showTestResult(resultEl, false, 'Please fill in workspace, username, and token');
+function updateBitbucketForm() {
+  const server = isBitbucketServer();
+  document.getElementById('bbServerUrlGroup').style.display = server ? 'block' : 'none';
+  document.getElementById('bbWorkspaceLabel').textContent = server ? 'Project key' : 'Workspace';
+  document.getElementById('bbWorkspace').placeholder = server ? 'PROJECTKEY' : 'my-workspace';
+  document.getElementById('bbUsernameLabel').textContent = server ? 'Username (optional)' : 'Account email';
+  document.getElementById('bbTokenLabel').textContent = server ? 'HTTP access token' : 'API token / App password';
+  document.getElementById('bbTokenHint').textContent = server
+    ? 'Create it in Bitbucket: your avatar > Manage account > HTTP access tokens, with Repository read permission.'
+    : 'Create it at bitbucket.org: Personal settings > API tokens, with repository read scope.';
+  // Changing the type invalidates an earlier connection test.
+  document.getElementById('bbAddBtn').disabled = true;
+  state.bbConnectionTested = false;
+}
+
+// Fill project key and repository from a pasted repository link, e.g.
+// https://bitbucket.company.com/projects/KEY/repos/my_repo/browse
+function fillFromServerUrl() {
+  const url = document.getElementById('bbServerUrl').value.trim();
+  const match = url.match(/^https:\/\/.+?\/(?:projects|users)\/([^/]+)\/repos\/([^/?#]+)/i);
+  if (match) {
+    document.getElementById('bbWorkspace').value = decodeURIComponent(match[1]);
+    document.getElementById('bbRepository').value = decodeURIComponent(match[2]);
+  }
+}
+
+function bitbucketFormValues() {
+  const server = isBitbucketServer();
+  return {
+    server_url: server ? document.getElementById('bbServerUrl').value.trim() : null,
+    workspace: document.getElementById('bbWorkspace').value.trim(),
+    repository: document.getElementById('bbRepository').value.trim(),
+    branch: document.getElementById('bbBranch').value.trim() || 'main',
+    username: document.getElementById('bbUsername').value.trim(),
+    token: document.getElementById('bbToken').value,
+  };
+}
+
+function bitbucketFormError(v) {
+  if (v.server_url !== null && !/^https:\/\//i.test(v.server_url)) return 'Enter the server URL starting with https://';
+  if (!v.workspace) return isBitbucketServer() ? 'Enter the project key' : 'Enter the workspace';
+  if (!v.repository) return 'Enter the repository';
+  if (v.server_url === null && !v.username) return 'Enter your account email';
+  if (!v.token) return 'Enter the token';
+  return null;
+}
+
+async function testBitbucketConnection() {
+  const v = bitbucketFormValues();
+  const resultEl = document.getElementById('bbTestResult');
+  const error = bitbucketFormError(v);
+  if (error) {
+    showTestResult(resultEl, false, error);
     return;
   }
 
@@ -1070,17 +1121,20 @@ async function testBitbucketConnection() {
     const res = await fetch(`${API_BASE}/sources/bitbucket/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace, username, token }),
+      body: JSON.stringify({
+        server_url: v.server_url, workspace: v.workspace, repository: v.repository,
+        username: v.username, token: v.token,
+      }),
     });
     const data = await res.json();
 
-    if (data.success) {
-      const repoInfo = data.repos_found !== null ? ` (${data.repos_found} repos found)` : '';
-      showTestResult(resultEl, true, `Connection successful${repoInfo}`);
+    if (res.ok && data.success) {
+      const repoInfo = data.repos_found !== null ? ` (${data.repos_found} repos visible)` : '';
+      showTestResult(resultEl, true, `${data.message}${repoInfo}`);
       document.getElementById('bbAddBtn').disabled = false;
       state.bbConnectionTested = true;
     } else {
-      showTestResult(resultEl, false, data.message);
+      showTestResult(resultEl, false, data.message || data.detail || 'Connection failed');
       document.getElementById('bbAddBtn').disabled = true;
     }
   } catch (err) {
@@ -1089,14 +1143,10 @@ async function testBitbucketConnection() {
 }
 
 async function addBitbucketSource() {
-  const workspace = document.getElementById('bbWorkspace').value.trim();
-  const repository = document.getElementById('bbRepository').value.trim();
-  const branch = document.getElementById('bbBranch').value.trim() || 'main';
-  const username = document.getElementById('bbUsername').value.trim();
-  const token = document.getElementById('bbToken').value;
-
-  if (!workspace || !repository || !username || !token) {
-    showToast('Please fill in all required fields', 'error');
+  const v = bitbucketFormValues();
+  const error = bitbucketFormError(v);
+  if (error) {
+    showToast(error, 'error');
     return;
   }
 
@@ -1104,12 +1154,12 @@ async function addBitbucketSource() {
     const res = await fetch(`${API_BASE}/sources/bitbucket`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace, repository, branch, username, token }),
+      body: JSON.stringify(v),
     });
 
     if (res.ok) {
       closeModal('modalBitbucket');
-      showToast(`Repository ${workspace}/${repository} added`, 'success');
+      showToast(`Repository ${v.workspace}/${v.repository} added - click Index to make it searchable`, 'success');
       // Clear the token field immediately after success
       document.getElementById('bbToken').value = '';
       await loadAllSources();

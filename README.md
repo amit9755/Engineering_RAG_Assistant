@@ -194,6 +194,14 @@ Add a repository (**Knowledge Sources → Bitbucket**) or project (**→ Jira**)
 then click **Index**. Indexing runs in the background and the card shows its
 progress; previously indexed content stays searchable until it succeeds.
 
+- **Bitbucket Cloud and Bitbucket Server / Data Center** are both supported. In
+  **Add Repository**, choose the type. For a company-hosted server, paste the
+  repository page link (e.g. `https://bitbucket.company.com/projects/KEY/repos/repo/browse`)
+  to fill in the project key and repository, and use an **HTTP access token**
+  (avatar > Manage account > HTTP access tokens, *Repository read*); the username
+  is optional. Cloud uses the workspace, account email and an API token.
+  On networks that inspect HTTPS, `pip-system-certs` (in requirements) makes
+  Python trust the company certificate.
 - **Bitbucket** downloads the branch's latest commit as one archive and indexes
   readable source and text files (max 400 KB each), plus a file-tree overview.
   It skips build/dependency folders, lock files, binaries, and likely secrets

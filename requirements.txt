@@ -50,6 +50,8 @@ google-cloud-secret-manager==2.20.2
 
 # Credential storage (Fernet symmetric encryption for local dev)
 cryptography>=42.0.0
+# Trust the OS certificate store (company networks that inspect HTTPS)
+pip-system-certs>=4.0
 
 # Utilities
 pydantic==2.8.2

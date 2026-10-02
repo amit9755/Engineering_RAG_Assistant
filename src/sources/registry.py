@@ -111,6 +111,10 @@ class SourceRegistry:
                     last_sync_issue_updated TEXT
                 );
             """)
+            # Migration: Bitbucket Server / Data Center support (NULL = Bitbucket Cloud).
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(bitbucket_configs)")}
+            if "server_url" not in columns:
+                conn.execute("ALTER TABLE bitbucket_configs ADD COLUMN server_url TEXT")
         logger.info("source_registry_initialized", path=str(self._db_path))
 
     # ----------------------------------------------------------
@@ -292,8 +296,9 @@ class SourceRegistry:
             conn.execute(
                 """
                 INSERT INTO bitbucket_configs
-                    (source_id, workspace, repository, branch, credential_id, last_commit, file_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (source_id, workspace, repository, branch, credential_id, last_commit, file_count,
+                     server_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     config.source_id,
@@ -303,6 +308,7 @@ class SourceRegistry:
                     config.credential_id,
                     config.last_commit,
                     config.file_count,
+                    config.server_url,
                 ),
             )
 
@@ -329,6 +335,7 @@ class SourceRegistry:
             credential_id=row["credential_id"],
             last_commit=row["last_commit"],
             file_count=row["file_count"],
+            server_url=row["server_url"],
         )
 
     def update_bitbucket_config(
@@ -394,6 +401,7 @@ class SourceRegistry:
                         branch=cfg.branch,
                         last_commit=cfg.last_commit,
                         file_count=cfg.file_count,
+                        server_url=cfg.server_url,
                         credential_configured=True,
                     )
                 )
