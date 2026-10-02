@@ -32,14 +32,26 @@ def test_password_hashing():
     assert hash_password("same") != hash_password("same")  # random salt
 
 
-def test_first_start_creates_two_admins_with_password_file(users, tmp_path):
-    file = tmp_path / "initial.txt"
+def test_default_admins_use_username_as_password(users, tmp_path):
     create = UserStore.real_ensure_initial_admins   # the startup function (patched out elsewhere in tests)
-    assert create(users, password_file=file) == ["admin1", "admin2"]
-    lines = dict(l.split(": ", 1) for l in file.read_text().splitlines() if l.startswith("admin"))
-    assert set(lines) == {"admin1", "admin2"} and len(lines["admin1"]) >= 12
-    assert users.authenticate("admin1", lines["admin1"]).must_change_password
-    assert create(users, password_file=file) == []  # only on a fresh install
+    old_file = tmp_path / "initial.txt"
+    old_file.write_text("admin1: generated\n")
+    assert create(users, password_file=old_file) == ["admin1", "admin2"]
+    assert not old_file.exists()
+    for name in ("admin1", "admin2"):
+        user = users.authenticate(name, name)
+        assert user and user.is_admin and not user.must_change_password
+    assert create(users, password_file=old_file) == []   # nothing to do on the next start
+
+
+def test_existing_generated_passwords_are_reset_but_changed_ones_kept(users, tmp_path):
+    create = UserStore.real_ensure_initial_admins
+    users.create_user("admin1", "generated-pass-1", role="admin", must_change=True)   # never changed
+    users.create_user("admin2", "generated-pass-2", role="admin", must_change=True)
+    users.set_password("admin2", "my-own-password")                                 # admin2 changed it
+    assert create(users, password_file=tmp_path / "x.txt") == ["admin1"]
+    assert users.authenticate("admin1", "admin1")
+    assert users.authenticate("admin2", "my-own-password") and not users.authenticate("admin2", "admin2")
 
 
 def test_api_requires_sign_in(client):

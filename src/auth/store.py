@@ -126,8 +126,8 @@ class UserStore:
         with self._connect() as conn:
             return [self._user(r) for r in conn.execute("SELECT * FROM users ORDER BY id")]
 
-    def set_password(self, username: str, password: str, must_change: bool = False) -> None:
-        if len(password or "") < MIN_PASSWORD:
+    def set_password(self, username: str, password: str, must_change: bool = False, check_length: bool = True) -> None:
+        if check_length and len(password or "") < MIN_PASSWORD:
             raise ValueError(f"Password must be at least {MIN_PASSWORD} characters")
         with self._lock, self._connect() as conn:
             updated = conn.execute("UPDATE users SET password_hash = ?, must_change_password = ? WHERE username = ?",
@@ -187,26 +187,32 @@ class UserStore:
     def ensure_initial_admins(self, usernames=("admin1", "admin2"),
                               password_file: Path = Path("data/initial_admin_passwords.txt")) -> list:
         """
-        On a fresh install (no users), create the admin accounts with random passwords,
-        written once to data/initial_admin_passwords.txt (never to the log). Each must be
-        changed at first login.
+        Default admin accounts whose password is the same as the username (admin1 / admin1,
+        admin2 / admin2), as requested for this local installation. Created on a fresh
+        install; on an existing install, an admin still on a never-changed generated
+        password is reset to the default. Passwords someone has changed are kept.
         """
-        if self.count():
-            return []
-        lines = ["Initial admin passwords - you must change each one at first login,",
-                 "then delete this file.", ""]
+        changed = []
         for name in usernames:
-            password = secrets.token_urlsafe(12)
-            self.create_user(name, password, role="admin", must_change=True)
-            lines.append(f"{name}: {password}")
-        password_file.parent.mkdir(parents=True, exist_ok=True)
-        password_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        try:
-            os.chmod(password_file, 0o600)
-        except OSError:
-            pass
-        logger.warning("initial_admin_accounts_created", users=list(usernames), password_file=str(password_file))
-        return list(usernames)
+            user = self.get(name)
+            if user is None:
+                self._create_unchecked(name, name, role="admin")
+                changed.append(name)
+            elif user.must_change_password:
+                self.set_password(name, name, must_change=False, check_length=False)
+                changed.append(name)
+        if password_file.exists():
+            password_file.unlink()   # generated passwords from an earlier version are no longer valid
+        if changed:
+            logger.warning("default_admin_passwords_set", users=changed,
+                           note="password equals username; change it with the key button if the app is shared")
+        return changed
+
+    def _create_unchecked(self, username: str, password: str, role: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("INSERT INTO users (username, password_hash, role, must_change_password, created_at) "
+                         "VALUES (?, ?, ?, 0, ?)", (username, hash_password(password), role, time.time()))
+        logger.info("user_created", username=username, role=role)
 
 
 user_store = UserStore()

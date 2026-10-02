@@ -202,10 +202,12 @@ a GPU and longer on a CPU-only PC.
 
 ### Accounts and sign-in
 
-The app requires signing in. On the first start the server creates two admin
-accounts, `admin1` and `admin2`, with random passwords written once to
-`data/initial_admin_passwords.txt` (not committed, not logged). Each admin must
-choose a new password at first sign-in; then delete that file.
+The app requires signing in. Two admin accounts exist by default:
+`admin1` / `admin1` and `admin2` / `admin2` (password = username). These are
+easy to guess, which is acceptable only while the app listens on this machine
+(127.0.0.1); change them with the key button in the header before sharing the
+app on a network. An admin still on an earlier generated password is reset to
+this default at startup; passwords someone has changed are kept.
 
 - Each user sees only their own saved chats (last 10 per user). Knowledge
   sources are shared; only admins can add, re-index or delete them.

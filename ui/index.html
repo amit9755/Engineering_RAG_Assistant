@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=vision-20261003" />
+  <link rel="stylesheet" href="/static/style.css?v=login-20261003" />
 </head>
 <body>
 
@@ -158,7 +158,7 @@
             <textarea
               id="queryInput"
               class="query-input"
-              placeholder="Ask a question about your selected sources... (paste or attach an image to ask about it)"
+              placeholder="Ask a question, or paste / attach an image..."
               rows="1"
               onkeydown="handleKeyDown(event)"
               oninput="autoResize(this)"
@@ -573,6 +573,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=vision-20261003"></script>
+<script src="/static/app.js?v=login-20261003"></script>
 </body>
 </html>
