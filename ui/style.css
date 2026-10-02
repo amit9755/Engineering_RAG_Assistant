@@ -1071,3 +1071,25 @@ body {
 
 .message-bubble a { color: var(--accent); text-decoration: none; }
 .message-bubble a:hover { text-decoration: underline; }
+
+/* ===== Sign in ===== */
+.login-screen {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-primary);
+}
+.login-card {
+  width: 100%; max-width: 360px; margin: 16px; padding: 32px 28px; display: flex; flex-direction: column; gap: 12px;
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  text-align: center;
+}
+.login-logo { font-size: 30px; }
+.login-card h2 { font-size: 19px; color: var(--text-primary); }
+.login-sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 6px; }
+.login-card .form-input { text-align: left; }
+.login-error { color: var(--accent-red); font-size: 12.5px; min-height: 16px; }
+.login-btn { width: 100%; padding: 10px; }
+.user-badge { font-size: 12.5px; color: var(--text-secondary); margin-right: 4px; white-space: nowrap; }
+/* Signed-in non-admin users can chat but not change knowledge sources. */
+body.role-user .admin-only,
+body.role-user .source-card-actions,
+body.role-user #uploadAreaSources { display: none !important; }

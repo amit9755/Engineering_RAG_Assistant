@@ -12,7 +12,19 @@
 //   8. UTILITY FUNCTIONS
 // ============================================================
 
-const API_BASE = 'http://localhost:8000/api/v1';
+// Same origin as the page, so the sign-in cookie is sent (and 127.0.0.1 works too).
+const API_BASE = '/api/v1';
+
+// Any API call that comes back 401 means the session ended: show the sign-in screen.
+const realFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const res = await realFetch(...args);
+  const url = String(args[0] && args[0].url ? args[0].url : args[0]);
+  if (res.status === 401 && url.includes('/api/v1/') && !url.includes('/auth/')) {
+    showLogin('Your session ended. Please sign in again.');
+  }
+  return res;
+};
 
 // ===== Application State =====
 const state = {
@@ -34,17 +46,119 @@ const state = {
 };
 
 // ===== Initialisation =====
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   applyTheme(document.documentElement.dataset.theme);
   document.getElementById('sessionInfo').textContent = 'Session: ' + state.sessionId.slice(-8);
   checkServerHealth();
+  setInterval(checkServerHealth, 30000);
+  try {
+    const res = await realFetch(`${API_BASE}/auth/me`);
+    if (res.ok) onSignedIn(await res.json());
+    else showLogin();
+  } catch {
+    showLogin('Cannot reach the server. Is it running?');
+  }
+});
+
+// ============================================================
+// SIGN IN / SIGN OUT / CHANGE PASSWORD
+// ============================================================
+
+function showLogin(message = '') {
+  state.user = null;
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('loginError').textContent = message;
+  document.getElementById('loginPassword').value = '';
+  document.getElementById('loginUsername').focus();
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const button = document.getElementById('loginButton');
+  const errorEl = document.getElementById('loginError');
+  button.disabled = true;
+  errorEl.textContent = '';
+  try {
+    const res = await realFetch(`${API_BASE}/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: document.getElementById('loginUsername').value.trim(),
+                             password: document.getElementById('loginPassword').value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Sign in failed');
+    onSignedIn(data);
+  } catch (err) {
+    errorEl.textContent = err.message;
+  } finally {
+    button.disabled = false;
+    document.getElementById('loginPassword').value = '';
+  }
+}
+
+function onSignedIn(user) {
+  const switched = state.user && state.user.username !== user.username;
+  state.user = user;
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('userBadge').textContent = `\u{1F464} ${user.username}`;
+  document.body.classList.toggle('role-user', user.role !== 'admin');
+  if (switched || !state.started) resetChatView();
   loadKBStats();
   loadAllSources();
   loadChatList();
-  // Poll health every 30 seconds
-  setInterval(checkServerHealth, 30000);
-  setInterval(loadKBStats, 60000);
-});
+  if (!state.started) {
+    setInterval(() => { if (state.user) loadKBStats(); }, 60000);
+    state.started = true;
+  }
+  if (user.must_change_password) showChangePassword(true);
+}
+
+// Clear everything on screen that belongs to the previous user.
+function resetChatView() {
+  document.getElementById('messagesContainer').innerHTML = '';
+  document.getElementById('welcomeMessage').style.display = 'flex';
+  state.conversationHistory = [];
+  state.chatMessages = [];
+  state.chats = [];
+  state.sessionId = generateSessionId();
+  document.getElementById('sessionInfo').textContent = 'Session: ' + state.sessionId.slice(-8);
+  renderChatList();
+}
+
+async function signOut() {
+  try { await realFetch(`${API_BASE}/auth/logout`, { method: 'POST' }); } catch { /* signed out locally anyway */ }
+  resetChatView();
+  showLogin('You have signed out.');
+}
+
+function showChangePassword(required) {
+  ['pwCurrent', 'pwNew', 'pwRepeat'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('pwResult').style.display = 'none';
+  document.getElementById('passwordClose').style.display = required ? 'none' : '';
+  document.getElementById('passwordReason').textContent = required
+    ? 'This account still has its initial password. Choose your own password to continue.' : '';
+  document.getElementById('modalPassword').style.display = 'flex';
+}
+
+async function submitChangePassword(event) {
+  event.preventDefault();
+  const resultEl = document.getElementById('pwResult');
+  const current = document.getElementById('pwCurrent').value;
+  const next = document.getElementById('pwNew').value;
+  if (next !== document.getElementById('pwRepeat').value) return showTestResult(resultEl, false, 'New passwords do not match');
+  try {
+    const res = await fetch(`${API_BASE}/auth/change-password`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: current, new_password: next }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not change the password');
+    state.user = data;
+    closeModal('modalPassword');
+    showToast('Password changed', 'success');
+  } catch (err) {
+    showTestResult(resultEl, false, err.message);
+  }
+}
 
 // ============================================================
 // HEALTH CHECK

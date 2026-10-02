@@ -53,6 +53,12 @@ async def lifespan(app: FastAPI):
     logger.info("application_startup", environment=settings.environment)
     from src.sources.jobs import index_jobs
     index_jobs.recover_interrupted()
+    from src.auth.store import user_store
+    from src.chats.store import chat_store
+    created = user_store.ensure_initial_admins()
+    if created:
+        # Chats saved before accounts existed belong to the first admin.
+        chat_store.assign_unowned(created[0])
     logger.info("application_ready", host=settings.api_host, port=settings.api_port)
 
     yield  # Application runs here
@@ -88,7 +94,9 @@ app = FastAPI(
 # ============================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.environment == "development" else ["https://your-domain.com"],
+    # Same-origin UI only: other websites must not call the API with a user's session.
+    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"] if settings.environment == "development"
+    else ["https://your-domain.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,22 +110,29 @@ if os.path.exists(ui_path):
     app.mount("/static", StaticFiles(directory=ui_path), name="static")
 
 # Include routers
-from src.api.routes import query, ingest, health, chats
+from fastapi import Depends
+from src.api.routes import query, ingest, health, chats, auth
+from src.auth.deps import require_user, require_user_admin_to_change
 from src.api.routes.sources import documents as doc_sources
 from src.api.routes.sources import bitbucket as bb_sources
 from src.api.routes.sources import jira as jira_sources
 from src.api.routes.sources import progress as source_progress
 from src.api.routes.sources import confluence as confluence_sources
 
-app.include_router(query.router, prefix="/api/v1", tags=["Query"])
-app.include_router(ingest.router, prefix="/api/v1", tags=["Ingestion"])
+# Public: sign-in and health checks. Everything else needs a signed-in user;
+# changing knowledge sources needs an admin.
+signed_in = [Depends(require_user)]
+admin_to_change = [Depends(require_user_admin_to_change)]
+app.include_router(auth.router, prefix="/api/v1")
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
-app.include_router(doc_sources.router, prefix="/api/v1")
-app.include_router(bb_sources.router, prefix="/api/v1")
-app.include_router(jira_sources.router, prefix="/api/v1")
-app.include_router(source_progress.router, prefix="/api/v1")
-app.include_router(confluence_sources.router, prefix="/api/v1")
-app.include_router(chats.router, prefix="/api/v1")
+app.include_router(query.router, prefix="/api/v1", tags=["Query"], dependencies=signed_in)
+app.include_router(chats.router, prefix="/api/v1", dependencies=signed_in)
+app.include_router(source_progress.router, prefix="/api/v1", dependencies=signed_in)
+app.include_router(ingest.router, prefix="/api/v1", tags=["Ingestion"], dependencies=admin_to_change)
+app.include_router(doc_sources.router, prefix="/api/v1", dependencies=admin_to_change)
+app.include_router(bb_sources.router, prefix="/api/v1", dependencies=admin_to_change)
+app.include_router(jira_sources.router, prefix="/api/v1", dependencies=admin_to_change)
+app.include_router(confluence_sources.router, prefix="/api/v1", dependencies=admin_to_change)
 
 
 @app.get("/", include_in_schema=False)

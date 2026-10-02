@@ -41,6 +41,9 @@ class ChatStore:
                     PRIMARY KEY (chat_id, position)
                 );
             """)
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(chats)")}
+            if "owner" not in columns:   # migration: chats saved before accounts existed
+                conn.execute("ALTER TABLE chats ADD COLUMN owner TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -54,8 +57,12 @@ class ChatStore:
         first = " ".join(first.split())
         return first if len(first) <= 60 else first[:57] + "..."
 
-    def save(self, chat_id: str, messages: List[dict]) -> dict:
-        """Replace a chat's messages (create it if new), then keep only the newest chats."""
+    def assign_unowned(self, owner: str) -> int:
+        with self._lock, self._connect() as conn:
+            return conn.execute("UPDATE chats SET owner = ? WHERE owner IS NULL", (owner,)).rowcount
+
+    def save(self, chat_id: str, messages: List[dict], owner: str) -> dict:
+        """Replace one of the owner's chats (create it if new), then keep only their newest chats."""
         if not CHAT_ID.match(chat_id or ""):
             raise ValueError("Invalid chat id")
         clean = []
@@ -68,29 +75,34 @@ class ChatStore:
             raise ValueError("A chat needs at least one message")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
+            current = conn.execute("SELECT owner FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            if current and current["owner"] != owner:
+                raise PermissionError("Chat not found")   # never overwrite another user's chat
             conn.execute(
-                "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) "
+                "INSERT INTO chats (id, title, created_at, updated_at, owner) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at",
-                (chat_id, self._title(clean), now, now))
+                (chat_id, self._title(clean), now, now, owner))
             conn.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
             conn.executemany(
                 "INSERT INTO chat_messages (chat_id, position, role, content, sources) VALUES (?, ?, ?, ?, ?)",
                 [(chat_id, i, m["role"], m["content"], json.dumps(m["sources"])) for i, m in enumerate(clean)])
-            # Keep only the most recently updated chats.
-            conn.execute("DELETE FROM chats WHERE id NOT IN "
-                         "(SELECT id FROM chats ORDER BY updated_at DESC LIMIT ?)", (self.max_chats,))
+            # Keep only each user's most recently updated chats.
+            conn.execute("DELETE FROM chats WHERE owner = ? AND id NOT IN "
+                         "(SELECT id FROM chats WHERE owner = ? ORDER BY updated_at DESC LIMIT ?)",
+                         (owner, owner, self.max_chats))
         return {"id": chat_id, "title": self._title(clean), "updated_at": now, "message_count": len(clean)}
 
-    def list(self) -> List[dict]:
+    def list(self, owner: str) -> List[dict]:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT c.id, c.title, c.updated_at, COUNT(m.position) AS message_count FROM chats c "
-                "LEFT JOIN chat_messages m ON m.chat_id = c.id GROUP BY c.id ORDER BY c.updated_at DESC").fetchall()
+                "LEFT JOIN chat_messages m ON m.chat_id = c.id WHERE c.owner = ? GROUP BY c.id "
+                "ORDER BY c.updated_at DESC", (owner,)).fetchall()
         return [dict(r) for r in rows]
 
-    def get(self, chat_id: str) -> Optional[dict]:
+    def get(self, chat_id: str, owner: str) -> Optional[dict]:
         with self._connect() as conn:
-            chat = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            chat = conn.execute("SELECT * FROM chats WHERE id = ? AND owner = ?", (chat_id, owner)).fetchone()
             if not chat:
                 return None
             rows = conn.execute("SELECT role, content, sources FROM chat_messages WHERE chat_id = ? "
@@ -99,9 +111,9 @@ class ChatStore:
                 "messages": [{"role": r["role"], "content": r["content"], "sources": json.loads(r["sources"])}
                              for r in rows]}
 
-    def delete(self, chat_id: str) -> bool:
+    def delete(self, chat_id: str, owner: str) -> bool:
         with self._lock, self._connect() as conn:
-            return conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,)).rowcount > 0
+            return conn.execute("DELETE FROM chats WHERE id = ? AND owner = ?", (chat_id, owner)).rowcount > 0
 
 
 chat_store = ChatStore()

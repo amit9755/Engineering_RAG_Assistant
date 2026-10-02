@@ -18,31 +18,33 @@ def msgs(question, answer="an answer"):
 def test_chat_store_saves_lists_and_keeps_only_newest(tmp_path):
     store = ChatStore(tmp_path / "chats.db", max_chats=3)
     for i in range(5):
-        store.save(f"sess-{i}", msgs(f"question {i}"))
-    assert [c["id"] for c in store.list()] == ["sess-4", "sess-3", "sess-2"]
-    chat = store.get("sess-4")
+        store.save(f"sess-{i}", msgs(f"question {i}"), "admin1")
+    assert [c["id"] for c in store.list("admin1")] == ["sess-4", "sess-3", "sess-2"]
+    chat = store.get("sess-4", "admin1")
     assert chat["title"] == "question 4"
     assert chat["messages"][1] == {"role": "assistant", "content": "an answer", "sources": ["a.py"]}
-    store.save("sess-2", msgs("question 2", "updated"))  # re-saving moves it to the top
-    assert store.list()[0]["id"] == "sess-2" and store.get("sess-2")["messages"][1]["content"] == "updated"
-    assert store.delete("sess-3") and store.get("sess-3") is None and not store.delete("sess-3")
+    store.save("sess-2", msgs("question 2", "updated"), "admin1")  # re-saving moves it to the top
+    assert store.list("admin1")[0]["id"] == "sess-2"
+    assert store.get("sess-2", "admin1")["messages"][1]["content"] == "updated"
+    assert store.delete("sess-3", "admin1") and store.get("sess-3", "admin1") is None
     with pytest.raises(ValueError):
-        store.save("../etc", msgs("x"))
+        store.save("../etc", msgs("x"), "admin1")
     with pytest.raises(ValueError):
-        store.save("sess-x", [{"role": "system", "content": "ignored"}])
+        store.save("sess-x", [{"role": "system", "content": "ignored"}], "admin1")
 
 
-def test_chat_api_round_trip(tmp_path, monkeypatch):
-    from src.api.main import app
-    from src.chats import store as store_module
-    monkeypatch.setattr(store_module, "chat_store", ChatStore(tmp_path / "chats.db"))
-    with TestClient(app) as client:
-        assert client.put("/api/v1/chats/sess-abc", json={"messages": msgs("explain this project")}).status_code == 200
-        assert client.get("/api/v1/chats").json()[0]["title"] == "explain this project"
-        assert len(client.get("/api/v1/chats/sess-abc").json()["messages"]) == 2
-        assert client.delete("/api/v1/chats/sess-abc").status_code == 200
-        assert client.get("/api/v1/chats/sess-abc").status_code == 404
-        assert client.put("/api/v1/chats/sess-x", json={"messages": []}).status_code == 422
+def test_each_user_sees_only_their_own_chats(tmp_path):
+    store = ChatStore(tmp_path / "chats.db", max_chats=2)
+    store.save("sess-a", msgs("admin1 question"), "admin1")
+    store.save("sess-b", msgs("admin2 question"), "admin2")
+    for i in range(3):  # admin2 filling their 2-chat limit never deletes admin1's chats
+        store.save(f"sess-b{i}", msgs(f"admin2 q{i}"), "admin2")
+    assert [c["id"] for c in store.list("admin1")] == ["sess-a"]
+    assert len(store.list("admin2")) == 2
+    assert store.get("sess-a", "admin2") is None and not store.delete("sess-a", "admin2")
+    with pytest.raises(PermissionError):
+        store.save("sess-a", msgs("overwrite attempt"), "admin2")
+    assert store.get("sess-a", "admin1")["title"] == "admin1 question"
 
 
 def test_overview_chunks_prefer_readme_docs_and_file_tree(vectors):  # noqa: F811

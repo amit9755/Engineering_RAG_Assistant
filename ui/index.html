@@ -8,9 +8,22 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=jql-20261003" />
+  <link rel="stylesheet" href="/static/style.css?v=auth-20261003" />
 </head>
 <body>
+
+<!-- Sign-in screen (shown until a session exists) -->
+<div id="loginScreen" class="login-screen" style="display:none">
+  <form class="login-card" onsubmit="submitLogin(event)" autocomplete="on">
+    <div class="login-logo">&#9881;</div>
+    <h2>Engineering RAG Assistant</h2>
+    <p class="login-sub">Sign in to continue</p>
+    <input id="loginUsername" class="form-input" placeholder="Username" autocomplete="username" required />
+    <input id="loginPassword" class="form-input" type="password" placeholder="Password" autocomplete="current-password" required />
+    <div id="loginError" class="login-error"></div>
+    <button class="btn-primary login-btn" type="submit" id="loginButton">Sign in</button>
+  </form>
+</div>
 
 <div class="app-container">
 
@@ -44,6 +57,9 @@
       </div>
     </div>
     <div class="header-right">
+      <span class="user-badge" id="userBadge" title="Signed in"></span>
+      <button class="btn-icon" onclick="showChangePassword(false)" title="Change password">&#128273;</button>
+      <button class="btn-icon" onclick="signOut()" title="Sign out">&#10162;</button>
       <button class="btn-icon" id="themeToggle" onclick="toggleTheme()" title="Switch to dark mode">&#9790;</button>
       <button class="btn-icon" onclick="toggleSettings()" title="Settings">&#9881;</button>
       <button class="btn-icon" onclick="newChat()" title="New chat">&#43;</button>
@@ -272,7 +288,7 @@
         <div class="source-panel" id="spanel-bitbucket">
           <div class="source-panel-header">
             <h3>Bitbucket Repositories</h3>
-            <button class="btn-primary" onclick="showAddBitbucketModal()">
+            <button class="btn-primary admin-only" onclick="showAddBitbucketModal()">
               &#43; Add Repository
             </button>
           </div>
@@ -289,7 +305,7 @@
         <div class="source-panel" id="spanel-jira">
           <div class="source-panel-header">
             <h3>Jira Projects</h3>
-            <button class="btn-primary" onclick="showAddJiraModal()">
+            <button class="btn-primary admin-only" onclick="showAddJiraModal()">
               &#43; Add Jira Project
             </button>
           </div>
@@ -306,7 +322,7 @@
         <div class="source-panel" id="spanel-confluence">
           <div class="source-panel-header">
             <h3>Confluence Spaces</h3>
-            <button class="btn-primary" onclick="showAddConfluenceModal()">
+            <button class="btn-primary admin-only" onclick="showAddConfluenceModal()">
               &#43; Add Confluence Space
             </button>
           </div>
@@ -507,6 +523,33 @@
   </div>
 </div>
 
+<!-- Change Password Modal -->
+<div class="modal-overlay" id="modalPassword" style="display:none">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128273; Change password</h3>
+      <button class="modal-close" id="passwordClose" onclick="closeModal('modalPassword')">&times;</button>
+    </div>
+    <form class="modal-body" onsubmit="submitChangePassword(event)">
+      <p class="field-hint" id="passwordReason"></p>
+      <div class="form-group">
+        <label class="field-label">Current password</label>
+        <input type="password" id="pwCurrent" class="form-input" autocomplete="current-password" required />
+      </div>
+      <div class="form-group">
+        <label class="field-label">New password (at least 8 characters)</label>
+        <input type="password" id="pwNew" class="form-input" autocomplete="new-password" minlength="8" required />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Repeat new password</label>
+        <input type="password" id="pwRepeat" class="form-input" autocomplete="new-password" minlength="8" required />
+      </div>
+      <div id="pwResult" class="connection-result" style="display:none"></div>
+      <div class="modal-footer"><button class="btn-primary" type="submit">Save password</button></div>
+    </form>
+  </div>
+</div>
+
 <!-- Confirm Delete Modal -->
 <div class="modal-overlay" id="modalConfirmDelete" style="display:none" onclick="closeModal('modalConfirmDelete')">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
@@ -525,6 +568,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=jql-20261003"></script>
+<script src="/static/app.js?v=auth-20261003"></script>
 </body>
 </html>

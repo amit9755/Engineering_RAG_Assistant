@@ -188,6 +188,25 @@ and Markdown up to 50 MB each. Legacy `.doc` files should be saved as `.docx`.
 Files uploaded before document management appear under **Older uploads** with a
 text preview; they stay searchable and can be removed, but not reindexed.
 
+### Accounts and sign-in
+
+The app requires signing in. On the first start the server creates two admin
+accounts, `admin1` and `admin2`, with random passwords written once to
+`data/initial_admin_passwords.txt` (not committed, not logged). Each admin must
+choose a new password at first sign-in; then delete that file.
+
+- Each user sees only their own saved chats (last 10 per user). Knowledge
+  sources are shared; only admins can add, re-index or delete them.
+- Passwords are stored as salted PBKDF2 hashes; sessions use an HttpOnly,
+  SameSite=Strict cookie (7 days). Five wrong passwords lock an account for 5 minutes.
+- Manage accounts from the project folder (passwords are typed at a hidden prompt):
+
+```bash
+python -m src.auth.cli list
+python -m src.auth.cli create <username> [--admin]
+python -m src.auth.cli reset-password <username>
+```
+
 ### Network policy (company networks)
 
 Set `ALLOW_EXTERNAL_NETWORK=false` in `.env` to keep every call inside the

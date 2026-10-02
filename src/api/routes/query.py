@@ -10,7 +10,7 @@
 #   FastAPI auto-generates documentation from these models.
 # ============================================================
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
@@ -105,7 +105,7 @@ class QueryResponse(BaseModel):
 @router.post("/query", response_model=QueryResponse, summary="Ask a question")
 async def query_endpoint(
     request: QueryRequest,
-    x_user_id: str = Header(default="anonymous", alias="X-User-ID"),
+    http: Request,
 ):
     """
     Main RAG query endpoint. Runs the full LangGraph pipeline:
@@ -123,6 +123,7 @@ async def query_endpoint(
     """
     # Generate session ID if not provided
     session_id = request.session_id or str(uuid.uuid4())
+    x_user_id = http.state.user.username
 
     logger.info(
         "query_received",
@@ -182,7 +183,7 @@ async def suggestions_endpoint(request: SuggestionsRequest):
 @router.post("/query/stream", summary="Ask a question with streaming response")
 async def query_stream_endpoint(
     request: QueryRequest,
-    x_user_id: str = Header(default="anonymous", alias="X-User-ID"),
+    http: Request,
 ):
     """
     Streaming RAG endpoint. Returns tokens as Server-Sent Events (SSE).
@@ -198,6 +199,7 @@ async def query_stream_endpoint(
             data: {"type": "metadata", "sources": [...], "done": true}\n\n
     """
     session_id = request.session_id or str(uuid.uuid4())
+    x_user_id = http.state.user.username
     history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
 
     async def event_generator():
