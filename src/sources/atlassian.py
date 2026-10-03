@@ -59,6 +59,31 @@ class AtlassianSession:
             raise IndexingError(f"The {self.product} account lacks permission for this request.")
         return response
 
+    def post(self, path: str, body: dict, timeout: int = 60):
+        """POST JSON to base_url + path (creating issues). Same auth, policy and errors as get()."""
+        from src import network_policy
+        url = f"{self.base_url}{path}"
+        try:
+            network_policy.check_url(url, f"a {self.product} request")
+        except network_policy.ExternalNetworkBlocked as exc:
+            raise IndexingError(str(exc)) from exc
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        try:
+            if self.cloud:
+                response = self.http.post(url, json=body, auth=(self.username, self.token), headers=headers,
+                                          timeout=timeout)
+            else:
+                response = self.http.post(url, json=body, timeout=timeout,
+                                          headers={**headers, "Authorization": f"Bearer {self.token}"})
+                if response.status_code == 401 and self.username:
+                    response = self.http.post(url, json=body, auth=(self.username, self.token), headers=headers,
+                                              timeout=timeout)
+        except requests.RequestException as exc:
+            raise IndexingError(f"Could not reach {self.product} at {self.base_url}: {exc.__class__.__name__}.") from exc
+        if response.status_code == 401:
+            raise IndexingError(self.auth_hint())
+        return response
+
     def json(self, response, what: str = "request"):
         """
         Parse a JSON response. A company server that answers with a web page (an SSO /

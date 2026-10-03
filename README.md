@@ -215,6 +215,18 @@ blocks with a Copy button and list assumptions. Suggestions are never applied
 to the repository. Without the code model, the general model answers and says
 how to install the better one.
 
+### Creating Jira tickets from a chat
+
+Say "create a jira ticket with this context", "raise a bug for this error" or
+"create a story for ...". The local model drafts the ticket from the
+conversation (type Bug / Task / Story, summary, description with context and
+related files, priority, labels) and a form opens: pick the project and issue
+type, edit everything, fill any fields your Jira requires (read live from Jira),
+then click **Create in Jira**. Nothing is created before that click. Any
+signed-in user can create tickets; they are created with the saved Jira token,
+so its owner appears as the reporter. The token needs the Create Issues
+permission in the project.
+
 ### Accounts and sign-in
 
 The app requires signing in. Two admin accounts exist by default:

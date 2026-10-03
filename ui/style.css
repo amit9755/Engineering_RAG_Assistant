@@ -1130,3 +1130,8 @@ body.role-user #uploadAreaSources { display: none !important; }
 /* Send button turns into Stop while an answer is generated */
 .btn-send.btn-stop { background: var(--accent-red); }
 .btn-send.btn-stop:hover { background: #b91c1c; }
+
+/* ===== Create Jira ticket form ===== */
+.modal.modal-wide { max-width: 680px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+textarea.form-input { resize: vertical; font-family: var(--font); line-height: 1.5; }

@@ -111,7 +111,7 @@ if os.path.exists(ui_path):
 
 # Include routers
 from fastapi import Depends
-from src.api.routes import query, ingest, health, chats, auth
+from src.api.routes import query, ingest, health, chats, auth, jira_tickets
 from src.auth.deps import require_user, require_user_admin_to_change
 from src.api.routes.sources import documents as doc_sources
 from src.api.routes.sources import bitbucket as bb_sources
@@ -127,6 +127,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(query.router, prefix="/api/v1", tags=["Query"], dependencies=signed_in)
 app.include_router(chats.router, prefix="/api/v1", dependencies=signed_in)
+app.include_router(jira_tickets.router, prefix="/api/v1", dependencies=signed_in)
 app.include_router(source_progress.router, prefix="/api/v1", dependencies=signed_in)
 app.include_router(ingest.router, prefix="/api/v1", tags=["Ingestion"], dependencies=admin_to_change)
 app.include_router(doc_sources.router, prefix="/api/v1", dependencies=admin_to_change)

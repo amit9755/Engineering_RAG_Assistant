@@ -8,7 +8,7 @@
     // Apply the saved theme before the page renders, to avoid a flash.
     try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch {}
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=stop-20261003" />
+  <link rel="stylesheet" href="/static/style.css?v=ticket-20261003" />
 </head>
 <body>
 
@@ -528,6 +528,48 @@
   </div>
 </div>
 
+<!-- Create Jira Ticket Modal (draft from the chat; created only on "Create in Jira") -->
+<div class="modal-overlay" id="modalTicket" style="display:none">
+  <div class="modal modal-wide" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>&#128203; Create Jira ticket</h3>
+      <button class="modal-close" onclick="closeModal('modalTicket')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p class="field-hint">Drafted from this chat. Review and edit everything - nothing is created until you click
+        <b>Create in Jira</b>. The ticket is created with the saved Jira token.</p>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="field-label">Project</label>
+          <select id="tkProject" class="form-input" onchange="loadTicketTypes()"></select>
+        </div>
+        <div class="form-group">
+          <label class="field-label">Issue type</label>
+          <select id="tkType" class="form-input" onchange="loadTicketFields()"></select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="field-label">Summary *</label>
+        <input type="text" id="tkSummary" class="form-input" maxlength="250" />
+      </div>
+      <div class="form-group">
+        <label class="field-label">Description</label>
+        <textarea id="tkDescription" class="form-input" rows="10"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="field-label">Labels (comma separated)</label>
+        <input type="text" id="tkLabels" class="form-input" />
+      </div>
+      <div id="tkFields"></div>
+      <div id="tkResult" class="connection-result" style="display:none"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modalTicket')">Cancel</button>
+      <button class="btn-primary" id="tkCreate" onclick="createTicket()">Create in Jira</button>
+    </div>
+  </div>
+</div>
+
 <!-- Change Password Modal -->
 <div class="modal-overlay" id="modalPassword" style="display:none">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
@@ -573,6 +615,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=stop-20261003"></script>
+<script src="/static/app.js?v=ticket-20261003"></script>
 </body>
 </html>

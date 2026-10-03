@@ -301,7 +301,8 @@ async function sendNormalQuery(question, sourceFilter, images = []) {
 
     // Update conversation history with assistant response
     state.conversationHistory.push({ role: 'assistant', content: data.answer });
-    afterAnswer(msgId, question, data.answer, data.sources || [], sourceFilter);
+    afterAnswer(msgId, question, data.answer, data.sources || [], sourceFilter, !data.action);
+    if (data.action?.type === 'jira_draft') openTicketForm(data.action.draft);
 
   } catch (err) {
     removeTypingIndicator(typingId);
@@ -368,11 +369,15 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
             updateStreamingMessage(msgId, fullResponse);
           }
 
+          if (event.action) state.pendingAction = event.action;
+
           if (event.done && event.type === 'metadata') {
             // Add sources to the message
             addSourcesToMessage(msgId, event.sources || []);
             state.conversationHistory.push({ role: 'assistant', content: fullResponse });
-            afterAnswer(msgId, question, fullResponse, event.sources || [], sourceFilter);
+            afterAnswer(msgId, question, fullResponse, event.sources || [], sourceFilter, !state.pendingAction);
+            if (state.pendingAction?.type === 'jira_draft') openTicketForm(state.pendingAction.draft);
+            state.pendingAction = null;
           }
         } catch { /* malformed event, skip */ }
       }
@@ -389,6 +394,113 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
     }
   } finally {
     setLoading(false);
+  }
+}
+
+// ============================================================
+// CREATE JIRA TICKET: review form for a draft written from the chat
+// ============================================================
+
+async function openTicketForm(draft) {
+  state.ticketDraft = draft;
+  document.getElementById('tkSummary').value = draft.summary || '';
+  document.getElementById('tkDescription').value = draft.description || '';
+  document.getElementById('tkLabels').value = (draft.labels || []).join(', ');
+  document.getElementById('tkResult').style.display = 'none';
+  document.getElementById('tkCreate').disabled = false;
+  document.getElementById('tkFields').innerHTML = '';
+  document.getElementById('modalTicket').style.display = 'flex';
+  const res = await fetch(`${API_BASE}/jira/projects`);
+  const projects = res.ok ? await res.json() : [];
+  const selected = new Set(Array.from(document.querySelectorAll('.source-select-cb:checked')).map(cb => cb.value));
+  projects.sort((a, b) => selected.has(b.source_id) - selected.has(a.source_id));
+  document.getElementById('tkProject').innerHTML = projects.map(p =>
+    `<option value="${escapeHtml(p.source_id)}">${escapeHtml(p.project_key)} (${escapeHtml(new URL(p.base_url).host)})</option>`).join('');
+  await loadTicketTypes();
+}
+
+async function loadTicketTypes() {
+  const sourceId = document.getElementById('tkProject').value;
+  const typeSelect = document.getElementById('tkType');
+  typeSelect.innerHTML = '<option>Loading...</option>';
+  const res = await fetch(`${API_BASE}/jira/${encodeURIComponent(sourceId)}/issue-types`);
+  const data = await res.json();
+  if (!res.ok) return showTicketResult(false, data.detail || 'Could not load issue types');
+  const wanted = (state.ticketDraft?.issue_type || '').toLowerCase();
+  typeSelect.innerHTML = data.map(t => `<option value="${escapeHtml(t.id)}" ${t.name.toLowerCase() === wanted ? 'selected' : ''}>
+      ${escapeHtml(t.name)}</option>`).join('');
+  await loadTicketFields();
+}
+
+async function loadTicketFields() {
+  const sourceId = document.getElementById('tkProject').value;
+  const typeId = document.getElementById('tkType').value;
+  const box = document.getElementById('tkFields');
+  box.innerHTML = '<p class="field-hint"><span class="spinner"></span> Loading required fields...</p>';
+  const res = await fetch(`${API_BASE}/jira/${encodeURIComponent(sourceId)}/fields?issue_type_id=${encodeURIComponent(typeId)}`);
+  const specs = await res.json();
+  if (!res.ok) { box.innerHTML = ''; return showTicketResult(false, specs.detail || 'Could not load fields'); }
+  state.ticketFields = specs;
+  const wantedPriority = (state.ticketDraft?.priority || '').toLowerCase();
+  box.innerHTML = specs.map(f => {
+    const label = `<label class="field-label">${escapeHtml(f.name)}${f.required ? ' *' : ''}</label>`;
+    const id = `tkf-${escapeHtml(f.id)}`;
+    if (f.type === 'option' || f.type === 'multi-option') {
+      const options = f.options.map(o => `<option value="${escapeHtml(o.id)}"
+          ${f.id === 'priority' && o.name.toLowerCase() === wantedPriority ? 'selected' : ''}>${escapeHtml(o.name)}</option>`).join('');
+      return `<div class="form-group">${label}<select id="${id}" class="form-input" ${f.type === 'multi-option' ? 'multiple size="4"' : ''}>
+          ${f.required || f.type === 'multi-option' ? '' : '<option value="">(not set)</option>'}${options}</select></div>`;
+    }
+    if (f.type === 'unsupported') {
+      return `<div class="form-group">${label}<p class="field-hint">This field type can't be set here${f.required
+        ? ' and Jira requires it - create the ticket in Jira directly, or ask your Jira admin to give it a default' : ''}.</p></div>`;
+    }
+    const inputType = { number: 'number', date: 'date' }[f.type] || 'text';
+    const hint = f.type === 'user' ? 'login ID' : (f.type === 'labels' ? 'comma separated' : '');
+    return `<div class="form-group">${label}<input id="${id}" class="form-input" type="${inputType}" placeholder="${hint}" /></div>`;
+  }).join('');
+}
+
+function showTicketResult(ok, message) {
+  showTestResult(document.getElementById('tkResult'), ok, message);
+}
+
+async function createTicket() {
+  const sourceId = document.getElementById('tkProject').value;
+  const summary = document.getElementById('tkSummary').value.trim();
+  if (!summary) return showTicketResult(false, 'Enter a summary');
+  const fields = {};
+  for (const f of state.ticketFields || []) {
+    const el = document.getElementById(`tkf-${f.id}`);
+    if (!el) continue;
+    const value = el.multiple ? Array.from(el.selectedOptions).map(o => o.value) : el.value.trim();
+    if (f.required && (!value || (Array.isArray(value) && !value.length))) return showTicketResult(false, `${f.name} is required`);
+    if (value && (!Array.isArray(value) || value.length)) fields[f.id] = value;
+  }
+  const button = document.getElementById('tkCreate');
+  button.disabled = true;
+  showTicketResult(true, 'Creating the ticket in Jira...');
+  try {
+    const res = await fetch(`${API_BASE}/jira/${encodeURIComponent(sourceId)}/issues`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        issue_type_id: document.getElementById('tkType').value, summary,
+        description: document.getElementById('tkDescription').value,
+        labels: document.getElementById('tkLabels').value.split(',').map(l => l.trim()).filter(Boolean), fields,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Jira did not create the ticket');
+    closeModal('modalTicket');
+    const note = `Created **[${data.key}](${data.url})**: ${summary}`;
+    addMessage('assistant', note);
+    state.conversationHistory.push({ role: 'assistant', content: note });
+    state.chatMessages.push({ role: 'assistant', content: note, sources: [] });
+    saveCurrentChat();
+    showToast(`Created ${data.key}`, 'success');
+  } catch (err) {
+    showTicketResult(false, err.message);
+    button.disabled = false;
   }
 }
 

@@ -103,6 +103,7 @@ class QueryResponse(BaseModel):
     input_safe: bool
     output_safe: bool
     error: Optional[str] = None
+    action: Optional[Dict[str, Any]] = None   # e.g. {"type": "jira_draft", "draft": {...}} for the UI
 
 
 async def image_answer_events(request: "QueryRequest", history: list):
@@ -187,6 +188,20 @@ async def stream_code_model(messages, status: str, max_tokens: int = 2000):
         yield f"data: {json.dumps({'token': CODE_MODEL_HINT, 'done': False})}\n\n"
 
 
+async def jira_draft_action(request: "QueryRequest", history: list):
+    """(message, action) when the user asks to create a Jira ticket; None otherwise."""
+    from starlette.concurrency import run_in_threadpool
+    from src.sources.jira_create import draft_ticket, is_create_request
+    from src.sources.registry import source_registry
+    if not is_create_request(request.question):
+        return None
+    if not source_registry.list_jira_sources():
+        return ("To create Jira tickets, first add a Jira project under **Knowledge Sources > Jira**.", None)
+    draft = await run_in_threadpool(draft_ticket, request.question, history)
+    return ("I drafted a Jira ticket from this conversation. **Review and edit it in the form**, then click "
+            "**Create in Jira** - nothing is created until you do.", {"type": "jira_draft", "draft": draft})
+
+
 def _vision_error(exc: Exception) -> str:
     text = str(exc)
     if "not found" in text.lower() and ("model" in text.lower() or "pull" in text.lower()):
@@ -228,6 +243,12 @@ async def query_endpoint(
     )
 
     history = [{"role": msg.role, "content": msg.content} for msg in request.conversation_history]
+    ticket = None if request.images else await jira_draft_action(request, history)
+    if ticket:
+        return QueryResponse(answer=ticket[0], sources=[], true_data_chunks=[], noisy_data_chunks=[], eval_metrics={},
+                             pipeline_steps=["jira draft"], query_intent="create_jira", rewritten_query=request.question,
+                             hallucination_score=0.0, model_used="local model (draft)", latency_ms=0,
+                             session_id=session_id, input_safe=True, output_safe=True, action=ticket[1])
     if request.images:
         import time
         started = time.time()
@@ -339,6 +360,15 @@ async def query_stream_endpoint(
                             yield f"data: {json.dumps({**event, 'done': False})}\n\n"
                 except ValueError as exc:
                     yield f"data: {json.dumps({'error': str(exc), 'done': True})}\n\n"
+                return
+
+            # "create a jira ticket for this": draft it for review in a form (never created here).
+            from src.sources.jira_create import is_create_request
+            if is_create_request(request.question):
+                yield f"data: {json.dumps({'status': 'Drafting a Jira ticket from this conversation...', 'done': False})}\n\n"
+                message, action = await jira_draft_action(request, history)
+                yield f"data: {json.dumps({'token': message, 'done': False, **({'action': action} if action else {})})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': [], 'true_data_count': 0, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
                 return
 
             # Jira filter questions (who / when / status) are answered by a live JQL search.
