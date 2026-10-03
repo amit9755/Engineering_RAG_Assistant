@@ -372,6 +372,8 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
           if (event.action) state.pendingAction = event.action;
 
           if (event.done && event.type === 'metadata') {
+            const streamed = document.getElementById(msgId);
+            if (streamed) renderDiagrams(streamed);
             // Add sources to the message
             addSourcesToMessage(msgId, event.sources || []);
             state.conversationHistory.push({ role: 'assistant', content: fullResponse });
@@ -395,6 +397,70 @@ async function sendStreamingQuery(question, sourceFilter, images = []) {
   } finally {
     setLoading(false);
   }
+}
+
+// ============================================================
+// DIAGRAMS: ```mermaid blocks in answers become pictures (bundled, offline)
+// ============================================================
+
+let mermaidReady = null;
+
+function loadMermaid() {
+  if (!mermaidReady) {
+    mermaidReady = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/static/vendor/mermaid.min.js';
+      script.onload = () => {
+        const dark = document.documentElement.dataset.theme === 'dark';
+        window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'default' });
+        resolve(window.mermaid);
+      };
+      script.onerror = () => reject(new Error('Diagram library could not be loaded'));
+      document.head.appendChild(script);
+    });
+  }
+  return mermaidReady;
+}
+
+// Small models often write almost-valid Mermaid: quote labels that contain (), /, : or spaces.
+function fixMermaid(source) {
+  return source
+    .replace(/^\s*mermaid\s*$/m, '')
+    .replace(/^(\s*)graph\b/m, '$1flowchart')
+    .replace(/(\b[\w-]+)\[(?![\["(])([^\]\n]+)\]/g, (m, id, label) => `${id}["${label.replace(/"/g, "'")}"]`)
+    .replace(/(\b[\w-]+)\((?![\["(])([^)\n]+)\)/g, (m, id, label) => `${id}("${label.replace(/"/g, "'")}")`)
+    .replace(/(\b[\w-]+)\{(?![{"])([^}\n]+)\}/g, (m, id, label) => `${id}{"${label.replace(/"/g, "'")}"}`)
+    .replace(/\|(?!")([^|\n]+)\|/g, (m, label) => `|"${label.replace(/"/g, "'")}"|`);
+}
+
+let diagramCounter = 0;
+
+async function renderDiagrams(root) {
+  const blocks = Array.from(root.querySelectorAll('.code-block[data-lang="mermaid"]:not([data-rendered])'));
+  if (!blocks.length) return;
+  let mermaid;
+  try { mermaid = await loadMermaid(); } catch { return; }
+  for (const block of blocks) {
+    block.dataset.rendered = '1';
+    const source = block.querySelector('code').textContent;
+    const holder = document.createElement('div');
+    holder.className = 'diagram';
+    try {
+      const { svg } = await mermaid.render(`diagram-${Date.now()}-${++diagramCounter}`, fixMermaid(source));
+      holder.innerHTML = svg;
+      block.parentNode.insertBefore(holder, block);
+      const toggle = document.createElement('details');
+      toggle.className = 'diagram-source';
+      toggle.innerHTML = '<summary>Diagram source</summary>';
+      block.parentNode.insertBefore(toggle, block);
+      toggle.appendChild(block);
+    } catch {
+      holder.className = 'diagram-error';
+      holder.textContent = "Couldn't draw this diagram (the model wrote invalid diagram syntax); its source is below.";
+      block.parentNode.insertBefore(holder, block);
+    }
+  }
+  scrollToBottom();
 }
 
 // ============================================================
@@ -804,6 +870,7 @@ function addMessage(role, content, meta = {}) {
 
   container.appendChild(div);
   scrollToBottom();
+  renderDiagrams(div);
   return id;
 }
 
@@ -1005,6 +1072,28 @@ function formatInline(html) {
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
+const LIST_ITEM = /^(\s*)([-*]|\d+[.)])\s+/;
+
+// Nested lists from indentation; ordered lists keep their first number ("2. Components").
+function renderListItems(items) {
+  let html = '';
+  let i = 0;
+  const build = (indent) => {
+    const first = items[i];
+    let out = first.ordered ? `<ol start="${first.num}">` : '<ul>';
+    while (i < items.length && items[i].indent >= indent) {
+      const item = items[i];
+      if (item.indent > indent) { out = out.replace(/<\/li>$/, '') + build(item.indent) + '</li>'; continue; }
+      if (item.ordered !== first.ordered) break;
+      out += `<li>${item.text}</li>`;
+      i++;
+    }
+    return out + (first.ordered ? '</ol>' : '</ul>');
+  };
+  while (i < items.length) html += build(items[i].indent);
+  return html;
+}
+
 // Small markdown renderer for chat answers: headings, bullet / numbered lists,
 // tables and paragraphs. Everything is escaped first, so model output can't inject HTML.
 function formatMessageContent(text) {
@@ -1026,7 +1115,7 @@ function formatMessageContent(text) {
       i++;
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i++]);
       const lang = fence[1] || 'code';
-      out.push(`<div class="code-block"><div class="code-head"><span>${lang}</span>` +
+      out.push(`<div class="code-block" data-lang="${lang.toLowerCase()}"><div class="code-head"><span>${lang}</span>` +
                `<button class="copy-code" type="button">Copy</button></div><pre><code>${code.join('\n')}</code></pre></div>`);
       continue;
     }
@@ -1047,16 +1136,18 @@ function formatMessageContent(text) {
         (header ? `<thead><tr>${header.map(c => `<th>${c}</th>`).join('')}</tr></thead>` : '') +
         `<tbody>${body.map(r => `<tr>${cells(r).map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>` +
         '</table></div>');
-    } else if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+    } else if (LIST_ITEM.test(line)) {
       flush();
-      const ordered = /^\s*\d+\./.test(line);
+      // Collect the whole (possibly nested) list: indented items belong to the item above.
       const items = [];
-      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
-        items.push(`<li>${formatInline(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, ''))}</li>`);
+      while (i < lines.length && LIST_ITEM.test(lines[i])) {
+        const m = lines[i].match(LIST_ITEM);
+        items.push({ indent: m[1].replace(/\t/g, '    ').length, ordered: /\d/.test(m[2]),
+                     num: parseInt(m[2], 10) || 1, text: formatInline(lines[i].slice(m[0].length)) });
         i++;
       }
       i--;
-      out.push(ordered ? `<ol>${items.join('')}</ol>` : `<ul>${items.join('')}</ul>`);
+      out.push(renderListItems(items));
     } else if (!line.trim()) {
       flush();
     } else {

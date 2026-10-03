@@ -131,3 +131,51 @@ def test_answers_stop_before_inventing_a_user_turn(monkeypatch):
     nodes.generation_node({"original_query": "how does publish work?", "true_data_chunks": [{"content": "x"}],
                            "assembled_context": "x", "pipeline_steps": []})
     assert "\nUser:" in seen["stop"]
+
+
+@pytest.mark.parametrize("question,review,arch", [
+    ("tell me whts you want changes here", True, False), ("what would you change in constants.ts", True, False),
+    ("review it", True, False), ("can you draw arch of this project", False, True),
+    ("show the architecture diagram", False, True), ("how is the repository structured?", False, True),
+    ("how does login work", False, False), ("explain this file", False, False),
+])
+def test_review_and_architecture_detection(question, review, arch):
+    from src.graph.nodes import is_architecture_request, is_review_request
+    assert is_review_request(question) is review and is_architecture_request(question) is arch
+
+
+def test_review_follow_up_reuses_previous_file(repo):
+    history = [{"role": "user", "content": "FE/src/constants/constants.ts explain this file"},
+               {"role": "assistant", "content": "..."},
+               {"role": "user", "content": "tell me whts you want changes here"}]
+    assert file_for_question("tell me whts you want changes here", history)[2] == "FE/src/constants/constants.ts"
+
+
+def test_repo_layout_is_exact(repo):
+    from src.graph.nodes import repo_layout
+    layout, repos = repo_layout()
+    assert repos == ["WSQ/app"] and layout.startswith("Repository WSQ/app (5 files):")
+    assert "FE/ (2 files): src/ (2)" in layout and "BE/ (3 files): routes/ (2), services/ (1)" in layout
+
+
+def test_review_and_architecture_stream_to_code_model(repo, monkeypatch):
+    from src.api.main import app
+    from src.gateway.llm_gateway import llm_gateway
+    prompts = []
+
+    async def stream(messages, temperature=0.1, max_tokens=1024, model=None, stop=None):
+        prompts.append(messages[0]["content"])
+        yield "ok"
+    monkeypatch.setattr(llm_gateway, "astream", stream)
+    monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
+    history = [{"role": "user", "content": "FE/src/constants/constants.ts explain this file"},
+               {"role": "assistant", "content": "..."},
+               {"role": "user", "content": "tell me whts you want changes here"}]
+    with TestClient(app) as client:
+        review = client.post("/api/v1/query/stream", json={"question": "tell me whts you want changes here",
+                                                           "conversation_history": history}).text
+        arch = client.post("/api/v1/query/stream", json={"question": "can you draw arch of this project"}).text
+    assert "Reviewing FE/src/constants/constants.ts" in review
+    assert "at most 5 improvements" in prompts[0] and "ACTIVE IN USE IN OFFLINE MODE" in prompts[0]
+    assert "Drawing the architecture" in arch
+    assert "Repository WSQ/app (5 files)" in prompts[1] and "flowchart LR" in prompts[1]

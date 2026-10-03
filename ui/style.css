@@ -1135,3 +1135,10 @@ body.role-user #uploadAreaSources { display: none !important; }
 .modal.modal-wide { max-width: 680px; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 textarea.form-input { resize: vertical; font-family: var(--font); line-height: 1.5; }
+
+/* ===== Diagrams ===== */
+.diagram { margin: 8px 0; padding: 12px; background: #fff; border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; text-align: center; }
+.diagram svg { max-width: 100%; height: auto; }
+.diagram-source summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); margin: 2px 0 6px; }
+.diagram-error { font-size: 12.5px; color: var(--accent-yellow); margin: 6px 0; }

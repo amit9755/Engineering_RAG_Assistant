@@ -215,6 +215,18 @@ blocks with a Copy button and list assumptions. Suggestions are never applied
 to the repository. Without the code model, the general model answers and says
 how to install the better one.
 
+### Reviews and architecture diagrams
+
+- **Review:** "what would you change in constants.ts", or after discussing a file
+  "what changes do you want here" / "review it": the code model reviews the whole
+  file and lists up to 5 concrete improvements. Treat them as suggestions to check.
+- **Architecture:** "draw the architecture" / "arch of this project" builds an
+  exact layout of the selected repositories from the index (top-level folders,
+  sub-folders, key files) plus README / design docs; the answer describes the
+  components and interactions and includes a diagram. Diagrams (```mermaid
+  blocks) are drawn in the chat by a bundled copy of Mermaid (ui/vendor), so
+  they work offline; the diagram source stays available under the picture.
+
 ### Creating Jira tickets from a chat
 
 Say "create a jira ticket with this context", "raise a bug for this error" or

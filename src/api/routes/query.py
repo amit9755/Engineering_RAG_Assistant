@@ -381,15 +381,29 @@ async def query_stream_endpoint(
                 return
 
             # "explain <file>" (or a follow-up like "explain each block"): the whole file, block by block.
-            from src.graph.nodes import (build_file_explain_messages, file_for_question,
-                                         is_file_explain_request, whole_file)
+            from src.graph.nodes import (architecture_inputs, build_file_explain_messages, file_for_question,
+                                         is_architecture_request, is_file_explain_request, is_review_request,
+                                         whole_file)
             file_ref = await run_in_threadpool(file_for_question, request.question, history, request.source_filter())
-            if file_ref and is_file_explain_request(request.question):
+            review = bool(file_ref) and is_review_request(request.question)
+            if file_ref and (review or is_file_explain_request(request.question)):
+                # Whole file, explained block by block - or reviewed with concrete suggestions.
                 content, truncated = await run_in_threadpool(whole_file, file_ref[0], file_ref[2])
-                messages = build_file_explain_messages(file_ref[2], content, truncated, request.question, history)
-                async for event in stream_code_model(messages, f"Explaining {file_ref[2]} with {{model}}...", 2500):
+                messages = build_file_explain_messages(file_ref[2], content, truncated, request.question, history,
+                                                       review=review)
+                verb = "Reviewing" if review else "Explaining"
+                async for event in stream_code_model(messages, f"{verb} {file_ref[2]} with {{model}}...", 2500):
                     yield event
                 yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': [file_ref[1]], 'true_data_count': 1, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
+                return
+
+            if is_architecture_request(request.question):
+                # Architecture: exact repository layout + README / design docs -> overview and a diagram.
+                messages, arch_sources = await run_in_threadpool(architecture_inputs, request.question, history,
+                                                                 request.source_filter())
+                async for event in stream_code_model(messages, "Drawing the architecture with {model}...", 2000):
+                    yield event
+                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': arch_sources, 'true_data_count': len(arch_sources), 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
                 return
 
             true_chunks, noisy_chunks = await run_in_threadpool(

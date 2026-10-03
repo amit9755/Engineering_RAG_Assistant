@@ -480,13 +480,30 @@ def find_file_reference(text: str, source_filter=None) -> Optional[tuple]:
     return None
 
 
+REVIEW_INTENT = re.compile(
+    r"\b(?:what (?:changes?|would you change|should (?:i|we) change|to change|can be improved|is wrong)|"
+    r"changes? (?:here|to this|in this|you want|would you)|want(?:s)? changes?|suggest(?:ed)? (?:changes?|improvements?)|"
+    r"review|improve(?:ments?)?|refactor(?:ing)?|clean ?up|code smells?|best practices?|"
+    r"(?:issues?|problems?|bugs?|mistakes?) (?:in|with) (?:this|it|the (?:file|code))|optimi[sz]e)\b", re.I)
+# A short follow-up that points at what was just discussed ("change here", "improve it").
+_DEICTIC = re.compile(r"\b(?:here|this (?:file|code|one)|that (?:file|code)|it)\b", re.I)
+
+
+def is_review_request(question: str) -> bool:
+    return bool(REVIEW_INTENT.search(question or ""))
+
+
 def file_for_question(question: str, history: List[Dict], source_filter=None) -> Optional[tuple]:
     """
     The file a question is about: named in it, or - for a follow-up such as "explain each
-    block" - named in one of the user's last few messages.
+    block", "what would you change here" or "refactor it" - named in one of the user's last
+    few messages.
     """
     found = find_file_reference(question, source_filter)
-    if found or not FILE_EXPLAIN_INTENT.search(question or ""):
+    q = question or ""
+    follow_up = (FILE_EXPLAIN_INTENT.search(q) or REVIEW_INTENT.search(q)
+                 or (_DEICTIC.search(q) and len(q.split()) <= 14))
+    if found or not follow_up:
         return found
     for message in reversed([m for m in history[:-1] if m.get("role") == "user"][-3:]):
         found = find_file_reference(message.get("content", ""), source_filter)
@@ -509,17 +526,126 @@ def whole_file(source_id: str, file_path: str) -> Tuple[str, bool]:
 
 
 def is_file_explain_request(question: str) -> bool:
-    return bool(FILE_EXPLAIN_INTENT.search(question or "")) and not is_code_request(question)
+    return bool(FILE_EXPLAIN_INTENT.search(question or "")) and not is_code_request(question) \
+        and not is_review_request(question)
+
+
+FILE_REVIEW_PROMPT = """You are a careful senior engineer reviewing a file from the user's repository.
+Give at most 5 improvements, most important first, and only ones you are confident are real
+improvements for THIS code. For each one:
+- a short heading and the line it concerns, quoted in a `code span`,
+- why it matters (bug risk, error handling, security, readability, duplication, performance),
+- the change, with a short before/after snippet only if it makes the change clear.
+Rules:
+- Never suggest removing input validation, sanitising (such as trim) or error handling.
+- Only suggest let -> const when the variable is never reassigned in the code shown.
+- Do not repeat the same kind of suggestion; do not copy large parts of the file.
+- If the code is already good, say so and list fewer items. Base everything on the code below.
+
+File: {path}
+```
+{content}
+```"""
 
 
 def build_file_explain_messages(file_path: str, content: str, truncated: bool, question: str,
-                                history: List[Dict]) -> List[Dict]:
+                                history: List[Dict], review: bool = False) -> List[Dict]:
     note = "\n(... file continues; only the first part is shown ...)" if truncated else ""
-    messages = [{"role": "system", "content": FILE_EXPLAIN_PROMPT.format(path=file_path, content=content + note)}]
+    prompt = FILE_REVIEW_PROMPT if review else FILE_EXPLAIN_PROMPT
+    messages = [{"role": "system", "content": prompt.format(path=file_path, content=content + note)}]
     prior = history[:-1] if history and history[-1].get("content") == question else history
     messages += [{"role": m["role"], "content": m["content"]} for m in prior[-2:]]
     messages.append({"role": "user", "content": question})
     return messages
+
+
+ARCH_INTENT = re.compile(
+    r"\b(?:arch|archi|architecture|architectural|diagram|draw|flow ?chart|block diagram|component diagram|"
+    r"system design|high[- ]level design|hld|how (?:is|are) (?:the|this) (?:project|repo|repository|system|code) "
+    r"(?:structured|organi[sz]ed|laid out)|(?:project|repo|repository|code ?base|folder) structure)\b", re.I)
+
+ARCH_PROMPT = """You are a software architect describing the user's repository from the material below
+(the real folder layout and key files, plus README / design docs). Answer with:
+
+1. **Overview** - 2-3 sentences: what the system is and its main parts.
+2. **Components** - one bullet per major part, named after the REAL top-level folders in the layout
+   (and what README / package.json say they are): what it does and its folder in parentheses.
+3. **How they interact** - the main request / data flows in a few bullets.
+4. **Diagram** - a Mermaid flowchart in a ```mermaid block. Rules so it renders:
+   start with "flowchart LR"; node ids are letters/digits only; write every label in double quotes
+   with the closing quote BEFORE the bracket, in the form N1["label text"]; edges in the form
+   N1 -->|"label text"| N2; no other text inside the block.
+   Draw ONE node per component (a top-level folder, service, database or external system such as an
+   API or webhook provider) - not one node per file or route - and each node only once; 5 to 12
+   nodes; arrows show who calls whom (users -> UI -> server/API -> data and external services).
+
+Use only components, folders and technologies that the layout, README or package.json show. Do not
+assume a framework (for example Angular, React, Express, Django) unless the material names it.
+
+Repository layout:
+{layout}
+
+Documentation and key files:
+{context}"""
+
+_KEY_FILES = re.compile(r"(?:^|/)(?:package\.json|angular\.json|tsconfig\.json|requirements\.txt|pyproject\.toml|"
+                        r"pom\.xml|build\.gradle|go\.mod|Dockerfile|docker-compose\.ya?ml|Jenkinsfile|"
+                        r"(?:server|app|main|index)\.(?:js|ts|py)|\.env\.example|README\.md)$", re.I)
+
+
+def is_architecture_request(question: str) -> bool:
+    return bool(ARCH_INTENT.search(question or ""))
+
+
+def repo_layout(source_filter=None, max_lines: int = 70) -> Tuple[str, List[str]]:
+    """
+    A compact, exact layout of the selected repositories from the index: top-level folders with
+    file counts and their main sub-folders, plus key files. Returns (text, repository names).
+    """
+    from collections import Counter, defaultdict
+    from src.retrieval.vector_store import vector_store
+    files = vector_store.list_files(None if source_filter is None else source_filter.source_ids)
+    by_repo = defaultdict(list)
+    for source_id, source_file, path in files:
+        repo = source_file[: -len(path) - 1] if source_file.endswith("/" + path) else source_id
+        by_repo[repo].append(path)
+    lines, repos = [], list(by_repo)[:3]
+    for repo in repos:
+        paths = by_repo[repo]
+        lines.append(f"Repository {repo} ({len(paths)} files):")
+        top = Counter(p.split("/")[0] if "/" in p else "(root files)" for p in paths)
+        for folder, count in top.most_common(12):
+            if folder == "(root files)":
+                root = [p for p in paths if "/" not in p]
+                lines.append(f"  (root) {', '.join(sorted(root)[:12])}")
+                continue
+            subs = Counter(p.split("/")[1] for p in paths if p.startswith(folder + "/") and p.count("/") >= 2)
+            sub_text = ", ".join(f"{name}/ ({n})" for name, n in subs.most_common(8))
+            lines.append(f"  {folder}/ ({count} files){': ' + sub_text if sub_text else ''}")
+        key = [p for p in paths if _KEY_FILES.search(p)][:15]
+        if key:
+            lines.append("  key files: " + ", ".join(key))
+    return "\n".join(lines[:max_lines]) or "(no indexed repository files)", repos
+
+
+def build_architecture_messages(question: str, layout: str, chunks: List[Dict], history: List[Dict]) -> List[Dict]:
+    context = format_context(chunks) or "(no documentation found)"
+    messages = [{"role": "system", "content": ARCH_PROMPT.format(layout=layout, context=context[:9000])}]
+    prior = history[:-1] if history and history[-1].get("content") == question else history
+    messages += [{"role": m["role"], "content": m["content"]} for m in prior[-2:]]
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def architecture_inputs(question: str, history: List[Dict], source_filter=None) -> Tuple[List[Dict], List[str]]:
+    """Messages for an architecture answer and the sources used (layout + README / design docs)."""
+    from src.retrieval.vector_store import vector_store
+    layout, _ = repo_layout(source_filter)
+    docs = vector_store.get_overview_chunks(source_filter, per_source=5)
+    chunks = [{"content": d.page_content, "source": d.metadata.get("source_file", ""),
+               "source_type": d.metadata.get("source_type", "document"), "score": 1.0} for d in docs]
+    sources = list(dict.fromkeys(c["source"] for c in chunks))
+    return build_architecture_messages(question, layout, chunks, history), sources
 
 
 def is_code_request(question: str) -> bool:
@@ -735,11 +861,17 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
 
     question = state.get("original_query", "")
     file_ref = file_for_question(question, state.get("conversation_history", []), state.get("source_filter"))
-    if file_ref and is_file_explain_request(question):
+    review = bool(file_ref) and is_review_request(question)
+    arch = not file_ref and is_architecture_request(question)
+    if (file_ref and (review or is_file_explain_request(question))) or arch:
         from src.gateway.llm_gateway import llm_gateway as gateway
-        content, truncated = whole_file(file_ref[0], file_ref[2])
-        messages = build_file_explain_messages(file_ref[2], content, truncated, question,
-                                               state.get("conversation_history", []))
+        if arch:
+            messages, arch_sources = architecture_inputs(question, state.get("conversation_history", []),
+                                                         state.get("source_filter"))
+        else:
+            content, truncated = whole_file(file_ref[0], file_ref[2])
+            messages = build_file_explain_messages(file_ref[2], content, truncated, question,
+                                                   state.get("conversation_history", []), review=review)
         try:
             model = gateway.code_model_string()
             response = gateway.complete(messages, temperature=0.2, max_tokens=2500, model=model)
@@ -749,7 +881,7 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
             response = gateway.complete(messages, temperature=0.2, max_tokens=2500) + CODE_MODEL_HINT
         steps.append("generation")
         return {"llm_response": response, "model_used": model, "pipeline_steps": steps,
-                "source_documents": [file_ref[1]]}
+                "source_documents": arch_sources if arch else [file_ref[1]]}
 
     if is_code_request(state.get("original_query", "")):
         from src.gateway.llm_gateway import llm_gateway as gateway
