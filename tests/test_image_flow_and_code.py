@@ -145,7 +145,7 @@ def test_code_mode_uses_code_model_and_falls_back_with_hint(code_index, monkeypa
     monkeypatch.delenv("OLLAMA_CODE_MODEL", raising=False)
     calls = []
 
-    async def stream(messages, temperature=0.1, max_tokens=1024, model=None):
+    async def stream(messages, temperature=0.1, max_tokens=1024, model=None, stop=None):
         calls.append(model)
         if model == "ollama/qwen2.5-coder:7b":
             raise RuntimeError("model not found")

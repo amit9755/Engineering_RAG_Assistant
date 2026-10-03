@@ -160,7 +160,7 @@ async def image_answer_events(request: "QueryRequest", history: list):
     } for c in true_chunks])
     catalog = await run_in_threadpool(knowledge_catalog, source_filter)
     messages = build_answer_messages(request.question, transcription, matches, context, catalog, history)
-    async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1200):
+    async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1200, stop=llm_gateway.ANSWER_STOP):
         yield {"token": token}
     yield {"sources": sources, "model": f"{vision_model} (read) + {llm_gateway._build_model_string()}"}
 
@@ -443,7 +443,8 @@ async def query_stream_endpoint(
             else:
                 messages = build_messages(guard_result.sanitized_text, format_context(chunk_dicts), catalog,
                                           history, request.question)
-                async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500):
+                async for token in llm_gateway.astream(messages, temperature=0.1, max_tokens=1500,
+                                                       stop=llm_gateway.ANSWER_STOP):
                     event = json.dumps({"token": token, "done": False})
                     yield f"data: {event}\n\n"
 

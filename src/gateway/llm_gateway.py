@@ -146,6 +146,7 @@ class LLMGateway:
         temperature: float = 0.1,
         max_tokens: int = 1024,
         model: Optional[str] = None,
+        stop: Optional[List[str]] = None,
     ) -> str:
         """
         Call the LLM with retry logic. Returns the response text.
@@ -179,6 +180,7 @@ class LLMGateway:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            **({"stop": stop} if stop else {}),
             **self._provider_options(model_name),
         )
 
@@ -216,6 +218,7 @@ class LLMGateway:
         temperature: float = 0.1,
         max_tokens: int = 1024,
         model: Optional[str] = None,
+        stop: Optional[List[str]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Streaming completion. Yields text chunks as they arrive.
@@ -235,6 +238,7 @@ class LLMGateway:
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            **({"stop": stop} if stop else {}),
             **self._provider_options(model_name),
         )
 
@@ -252,6 +256,9 @@ class LLMGateway:
         api_base = os.environ.get("OLLAMA_API_BASE", env_vals.get("OLLAMA_API_BASE", "")) or "http://localhost:11434"
         network_policy.check_url(api_base, "the Ollama model server")
         return f"ollama/{model}"
+
+    # Small models sometimes continue the chat by writing the user's next turn themselves.
+    ANSWER_STOP = ["\nUser:", "\nUSER:", "\nHuman:", "\nAssistant:", "\nASSISTANT:", "\n### User", "\n**User:**"]
 
     def vision_model_string(self) -> str:
         """

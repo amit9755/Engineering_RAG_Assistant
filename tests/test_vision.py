@@ -50,7 +50,7 @@ def test_image_is_read_once_then_answered_by_text_model(client, monkeypatch):
                         "Image shows: an error dialog")
     monkeypatch.setattr(hybrid_retriever, "retrieve", lambda q, **k: searched.append(q) or ([], []))
 
-    async def fake_stream(messages, temperature=0.1, max_tokens=1024, model=None):
+    async def fake_stream(messages, temperature=0.1, max_tokens=1024, model=None, stop=None):
         answered.update(messages=messages, model=model)
         yield "The token expired."
     monkeypatch.setattr(llm_gateway, "astream", fake_stream)

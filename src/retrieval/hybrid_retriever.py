@@ -254,6 +254,32 @@ def is_overview_question(text: str) -> bool:
     return bool(match.group(2)) or len(text.split()) <= 5
 
 
+# Code names in a question (fetchDeviceDetails, InstagramPanel, overall_status,
+# INSTAGRAM_RATE_LIMITED, api.client). Meaning / keyword search splits them into
+# common words, so they are also looked up word-for-word.
+_CODE_NAME = re.compile(r"\b(?:[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+|"
+                        r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[a-z_]\w*\.[a-z_]\w*(?:\.[a-z_]\w*)*)\b")
+_FILE_EXT = re.compile(r"\.(?:ts|tsx|js|jsx|py|java|go|rb|php|cs|html|css|scss|json|ya?ml|md|sql)$", re.I)
+
+
+def code_names(text: str, limit: int = 5) -> List[str]:
+    names = []
+    for match in _CODE_NAME.finditer(text or ""):
+        name = match.group(0)
+        if not _FILE_EXT.search(name) and name not in names and len(name) >= 4:
+            names.append(name)
+    return names[:limit]
+
+
+def _is_definition(text: str, name: str) -> bool:
+    """A line that defines the name (function / class / const / method / object key / assignment)."""
+    n = re.escape(name)
+    return bool(re.search(
+        rf"(?:\b(?:function|def|class|const|let|var|interface|type|enum|async)\s+{n}\b|"
+        rf"^\s*(?:export\s+)?(?:public|private|protected|static|readonly|\s)*{n}\s*[:=(]|"
+        rf"^\s*['\"]?{n}['\"]?\s*:)", text, re.M))
+
+
 def split_questions(text: str) -> List[str]:
     """Split a message into separate questions (one per line or per '?')."""
     import re
@@ -333,6 +359,27 @@ class HybridRetriever:
     MAX_SUB_QUESTIONS = 6
     MAX_MULTI_CHUNKS = 12
 
+    def code_name_chunks(self, query: str, source_filter=None, per_name: int = 4) -> List[ScoredChunk]:
+        """Chunks that contain code names from the question verbatim: definitions first, then uses."""
+        found, seen = [], set()
+        for name in code_names(query):
+            try:
+                hits = self.vector_store.find_text(name, source_filter, limit=40)
+            except Exception as exc:
+                logger.warning("code_name_lookup_failed", name=name, error=str(exc)[:120])
+                continue
+            hits = [h for h in hits if not (h.metadata.get("file_path") or "").startswith("(")]
+            definitions = [h for h in hits if _is_definition(h.page_content, name)]
+            uses = [h for h in hits if h not in definitions]
+            for doc in definitions[:2] + uses[:max(1, per_name - len(definitions[:2]))]:
+                key = _chunk_key(doc)
+                if key not in seen:
+                    seen.add(key)
+                    found.append(ScoredChunk(doc, 1.0, True, "code-name"))
+        if found:
+            logger.info("code_names_found", names=code_names(query), chunks=len(found))
+        return found
+
     def retrieve(
         self,
         query: str,
@@ -343,8 +390,19 @@ class HybridRetriever:
         Retrieve for a query; a message containing several questions is
         split so each question gets its own search and its own chunks
         (one search for five topics returns chunks for only one or two).
+        Code names in the question are also looked up word-for-word and put first.
         """
         self._ensure_bm25()
+        true_data, noisy_data = self._retrieve_split(query, k, source_filter)
+        exact = self.code_name_chunks(query, source_filter)
+        if exact:
+            keys = {_chunk_key(c.document) for c in exact}
+            true_data = exact + [c for c in true_data if _chunk_key(c.document) not in keys]
+            true_data = true_data[:max(settings.final_top_k, len(exact)) + 4]
+            noisy_data = [c for c in noisy_data if _chunk_key(c.document) not in keys]
+        return true_data, noisy_data
+
+    def _retrieve_split(self, query, k, source_filter):
         questions = split_questions(query)[:self.MAX_SUB_QUESTIONS]
         if len(questions) <= 1:
             return self._retrieve_one(query, k, source_filter, settings.final_top_k)

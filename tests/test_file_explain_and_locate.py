@@ -64,7 +64,7 @@ def test_explain_file_streams_whole_file_to_code_model(repo, monkeypatch):
     from src.gateway.llm_gateway import llm_gateway
     calls = {}
 
-    async def stream(messages, temperature=0.1, max_tokens=1024, model=None):
+    async def stream(messages, temperature=0.1, max_tokens=1024, model=None, stop=None):
         calls.update(messages=messages, model=model)
         yield "### `export const API`\nThe API base path."
     monkeypatch.setattr(llm_gateway, "astream", stream)
@@ -100,3 +100,34 @@ Last checked: Never"""
     assert {"OVERALL HEALTH", "TOTAL TESTBEDS", "Monitor and manage"} <= set(page["terms"])
     answer = format_locate_answer(matches, ["WSQ/app/BE/routes/a/route.ts"], transcription)
     assert "**Related by meaning**" in answer and "`BE/routes/a/route.ts`" in answer
+
+
+def test_code_names_are_found_word_for_word_definition_first(repo):
+    from unittest.mock import Mock
+    from src.retrieval.hybrid_retriever import HybridRetriever, BM25Retriever, code_names
+    repo._store.add_documents([
+        chunk("FE/src/app/services/device.service.ts", "getDetails() { return this.http.get(fetchDeviceDetails); }", 0),
+        chunk("FE/src/constants/constants.ts", "export const fetchDeviceDetails = `${base}/devices/details`;", 2),
+        chunk("FE/src/app/x.ts", "const fetchDeviceDetailsOld = 1", 0),
+    ], ids=["svc", "def", "other"])
+    assert code_names("explain the fetchDeviceDetails and fetchDevicesAnalytics functions") == [
+        "fetchDeviceDetails", "fetchDevicesAnalytics"]
+    retriever = object.__new__(HybridRetriever)
+    retriever.vector_store, retriever.bm25, retriever._bm25_ready = repo, BM25Retriever(), True
+    retriever.reranker = Mock()
+    retriever.reranker.rerank.return_value = []      # meaning-based search finds nothing
+    true, _ = retriever.retrieve("Can you explain the code in fetchDeviceDetails?")
+    files = [c.document.metadata["file_path"] for c in true]
+    assert files[0] == "FE/src/constants/constants.ts"          # the definition comes first
+    assert "FE/src/app/services/device.service.ts" in files     # then where it is used
+
+
+def test_answers_stop_before_inventing_a_user_turn(monkeypatch):
+    from src.graph import nodes
+    from src.gateway.llm_gateway import llm_gateway
+    seen = {}
+    monkeypatch.setattr(nodes, "knowledge_catalog", lambda f=None: [])
+    monkeypatch.setattr(llm_gateway, "complete", lambda messages, **k: seen.update(k) or "answer")
+    nodes.generation_node({"original_query": "how does publish work?", "true_data_chunks": [{"content": "x"}],
+                           "assembled_context": "x", "pipeline_steps": []})
+    assert "\nUser:" in seen["stop"]

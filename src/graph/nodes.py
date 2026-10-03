@@ -784,7 +784,7 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
                               state.get("original_query", ""))
 
     try:
-        response = llm_gateway.complete(messages, temperature=0.1, max_tokens=1500)
+        response = llm_gateway.complete(messages, temperature=0.1, max_tokens=1500, stop=llm_gateway.ANSWER_STOP)
         model_used = llm_gateway._build_model_string()
     except Exception as exc:
         err_str = str(exc)
