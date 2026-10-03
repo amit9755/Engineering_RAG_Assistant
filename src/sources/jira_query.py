@@ -33,6 +33,9 @@ _ME = re.compile(r"\b(by me|my|mine|to me|for me|myself|i (?:have |had )?(?:crea
 # A name right after the issue word ("jira Deversh jani", "tickets of Naresh") or possessive ("Naresh's bugs").
 _NAMED = re.compile(r"\b(?:jiras?|issues?|tickets?|bugs?|tasks?|stor(?:y|ies)|defects?)\s+(?:of|for|from|by|"
                     r"assigned to|created by|reported by|raised by)?\s*([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,2})", re.I)
+# A name right before the issue word ("deversh jani jira", "Naresh's tickets").
+_NAMED_BEFORE = re.compile(r"\b([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,2})(?:'s)?\s+(?:jiras?|issues?|tickets?|"
+                           r"bugs?|tasks?|stor(?:y|ies)|defects?)\b", re.I)
 _POSSESSIVE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'s\s+(?:jiras?|issues?|tickets?|bugs?|tasks?)", re.I)
 _COMMON = {"open", "opened", "closed", "created", "create", "resolved", "fixed", "done", "pending", "last", "past",
            "this", "that", "these", "all", "any", "in", "on", "the", "from", "which", "with", "about", "and", "or",
@@ -67,7 +70,7 @@ def parse_jira_question(question: str) -> Optional[JiraQuery]:
     q = " ".join((question or "").split())
     if not _JIRA_WORDS.search(q) or _ISSUE_KEY.search(q):
         return None
-    if not (_FILTER_CUES.search(q) or _POSSESSIVE.search(q) or _NAMED.search(q)):
+    if not (_FILTER_CUES.search(q) or _POSSESSIVE.search(q) or _NAMED.search(q) or _NAMED_BEFORE.search(q)):
         return None
     lower = q.lower()
     query = JiraQuery()
@@ -75,14 +78,24 @@ def parse_jira_question(question: str) -> Optional[JiraQuery]:
     if _ME.search(q):
         query.person = "me"
     else:
-        candidates = [m.group(1) for m in _PERSON.finditer(q)] + [m.group(1) for m in _POSSESSIVE.finditer(q)] + \
-                     [m.group(1) for m in _NAMED.finditer(q)]
-        for raw in candidates:
+        def is_name_word(word):
+            return word.lower() not in _COMMON and word.lower() not in _NOT_A_NAME
+        candidates = []
+        for match in list(_PERSON.finditer(q)) + list(_POSSESSIVE.finditer(q)) + list(_NAMED.finditer(q)):
             words = []
-            for word in raw.split():
-                if word.lower() in _COMMON or word.lower() in _NOT_A_NAME:
-                    break          # a name ends where ordinary words start ("Naresh in last month")
+            for word in match.group(1).split():
+                if not is_name_word(word):
+                    break          # after the issue word / "by": the name ends at ordinary words
                 words.append(word)
+            candidates.append(words)
+        for match in _NAMED_BEFORE.finditer(q):
+            words = []
+            for word in reversed(match.group(1).split()):
+                if not is_name_word(word):
+                    break          # before the issue word: the name is the trailing words ("tell me | deversh jani")
+                words.insert(0, word)
+            candidates.append(words)
+        for words in candidates:
             if words and len(" ".join(words)) >= 3:
                 query.person = " ".join(words)
                 break
@@ -205,29 +218,36 @@ def format_answer(project_key: str, query: JiraQuery, jql: str, issues: list, to
             f"\n\nJQL used: `{jql}`\n\n[Open this search in Jira]({link})  (live from Jira, not the index)")
 
 
-def _resolve_user(client, name: str) -> Optional[str]:
-    """JQL user reference for a display name, via Jira's user search."""
+def _name_score(typed: str, user: dict) -> float:
+    """How well a typed name matches a Jira user, 0-1: every typed word must closely match a word of
+    the user's display name / login (tolerates typos such as "Deversh" for "Devarsh")."""
+    from difflib import SequenceMatcher
+    words = re.findall(r"[a-z0-9]+", f"{user.get('displayName') or ''} {user.get('name') or ''}".lower())
+    typed_words = [w for w in re.findall(r"[a-z0-9]+", typed.lower()) if len(w) >= 2]
+    if not words or not typed_words:
+        return 0.0
+    return min(max(SequenceMatcher(None, t, w).ratio() for w in words) for t in typed_words)
+
+
+def _resolve_user(client, name: str) -> Optional[Tuple[str, str]]:
+    """(JQL user reference, display name) for a typed name, via Jira's user search; None if no close match."""
     cloud = client.api.cloud
-    path, params = ("/rest/api/3/user/search", {"query": name}) if cloud else \
-        ("/rest/api/2/user/search", {"username": name, "maxResults": 5})
-    tokens = [t.lower() for t in name.split()]
-    users = []
-    # Full name first; many servers only prefix-match one word, so fall back to the first name.
-    for term in dict.fromkeys([name, name.split()[0]]):
-        params = {"query": term} if cloud else {"username": term, "maxResults": 20}
+    path = "/rest/api/3/user/search" if cloud else "/rest/api/2/user/search"
+    # Jira matches prefixes of one word, so search the full name and each word (a typo in the
+    # first name is still found through the last name), then pick the closest match.
+    terms = list(dict.fromkeys([name] + [w for w in name.split() if len(w) >= 3]))
+    users = {}
+    for term in terms:
+        params = {"query": term, "maxResults": 50} if cloud else {"username": term, "maxResults": 50}
         response = client._get(path, params)
         if response.status_code == 200:
-            users = client.api.json(response, "user search") or []
-        if users:
-            break
-    def label(u):
-        return f"{u.get('displayName') or ''} {u.get('name') or ''} {u.get('emailAddress') or ''}".lower()
-    matching = [u for u in users if all(t in label(u) for t in tokens)]
-    if not matching:
+            for u in client.api.json(response, "user search") or []:
+                users[u.get("accountId") or u.get("name") or u.get("key")] = u
+    scored = sorted(((_name_score(name, u), u) for u in users.values()), key=lambda x: -x[0])
+    if not scored or scored[0][0] < 0.8:
         return None
-    exact = [u for u in matching if (u.get("displayName") or "").lower() == name.lower()]
-    user = (exact or matching)[0]
-    return _quote(user.get("accountId") or user.get("name") or user.get("key"))
+    user = scored[0][1]
+    return _quote(user.get("accountId") or user.get("name") or user.get("key")), user.get("displayName") or name
 
 
 def answer_jira_question(question: str, source_filter=None) -> Optional[Tuple[str, List[str]]]:
@@ -255,19 +275,28 @@ def answer_jira_question(question: str, source_filter=None) -> Optional[Tuple[st
         try:
             email, token = credential_store.retrieve(cfg.credential_id).split(":", 1)
             client = JiraClient(cfg.base_url, email, token)
-            user = None
+            user, matched = None, None
             if query.person == "me":
                 user = "currentUser()"
             elif query.person:
-                user = _resolve_user(client, query.person)
-                if not user:
-                    parts.append(f"No Jira user matching **{query.person}** was found on {cfg.base_url}.")
+                found = _resolve_user(client, query.person)
+                if not found:
+                    parts.append(f"No Jira user matching **{query.person}** was found on {cfg.base_url}. "
+                                 "Check the spelling, or use their login ID.")
                     continue
+                user, matched = found
             jql = build_jql(cfg.project_key, query, user)
             limit = MAX_COUNTED if query.count_only else query.limit
             issues, total = client.search(jql, limit)
             logger.info("jira_live_query", project=cfg.project_key, jql=jql, total=total)
-            parts.append(format_answer(cfg.project_key, query, jql, issues, total, cfg.base_url))
+            answer = format_answer(cfg.project_key, query, jql, issues, total, cfg.base_url)
+            # Say what was understood, so a wrong reading is visible instead of silently broad.
+            if matched:
+                answer = f"Matched Jira user: **{matched}**\n\n" + answer
+            elif not query.person:
+                answer = ("_No person filter: showing everyone's issues. To filter by person, ask for example "
+                          "\"jira of <name>\" or \"my jira\"._\n\n" + answer)
+            parts.append(answer)
             labels += [i["key"] for i in issues[:query.limit]]
         except (IndexingError, KeyError, ValueError) as exc:
             parts.append(f"Couldn't run the live Jira search on {cfg.project_key}: {exc}")

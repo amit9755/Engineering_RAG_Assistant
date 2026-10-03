@@ -104,15 +104,46 @@ def test_person_detection(question, person, role):
     assert (query.person, query.role) == (person, role)
 
 
-def test_user_lookup_falls_back_to_first_name_and_matches_all_words():
+def test_user_lookup_tolerates_typos_and_picks_the_closest_user():
     from unittest.mock import Mock
     from src.sources.jira_query import _resolve_user
     client = Mock()
     client.api.cloud = False
     client.api.json = lambda r, what: r.json()
-    users = [{"name": "nxa111", "displayName": "Deversh Patel"}, {"name": "nxa222", "displayName": "Deversh Jani"}]
-    client._get.side_effect = [response(200, []), response(200, users)]   # full name: none; first name: two
-    assert _resolve_user(client, "Deversh jani") == '"nxa222"'
-    assert client._get.call_args_list[1].args[1]["username"] == "Deversh"
-    client._get.side_effect = [response(200, users)]
+    jani = [{"name": "nxa222", "displayName": "Devarsh Jani"}, {"name": "nxa333", "displayName": "Ravi Jani"}]
+    others = [{"name": "nxa444", "displayName": "Dave Pragati Janardanbhai"}]
+    # "deversh jani" (typo): full name and "deversh" find nobody; "jani" finds the Janis.
+    client._get.side_effect = [response(200, []), response(200, []), response(200, jani + others)]
+    assert _resolve_user(client, "deversh jani") == ('"nxa222"', "Devarsh Jani")
+    assert [c.args[1]["username"] for c in client._get.call_args_list] == ["deversh jani", "deversh", "jani"]
+    client._get.side_effect = [response(200, others), response(200, []), response(200, [])]
     assert _resolve_user(client, "Nobody Else") is None
+
+
+@pytest.mark.parametrize("question,person", [
+    ("tell me deversh jani jira of the last month", "deversh jani"),   # name before the issue word
+    ("Naresh's tickets", "Naresh"),
+])
+def test_names_before_the_issue_word(question, person):
+    assert parse_jira_question(question).person == person
+
+
+def test_answer_states_the_person_filter(registry, monkeypatch):  # noqa: F811
+    import src.sources.registry as registry_module
+    import src.sources.credentials as credentials_module
+    from unittest.mock import Mock
+    registry.create_jira_source(JiraSourceConfig(source_id="jira-1", base_url="https://jira.example.com",
+                                                 project_key="WSQ", credential_id="c"), name="WSQ")
+    monkeypatch.setattr(registry_module, "source_registry", registry)
+    monkeypatch.setattr(credentials_module, "credential_store", FakeCredentials())
+    session = Mock()
+    monkeypatch.setattr("src.sources.atlassian.requests.Session", lambda: session)
+    session.get.side_effect = [response(200, []), response(200, []),
+                               response(200, [{"name": "nxa222", "displayName": "Devarsh Jani"}]),
+                               response(200, {"issues": [issue("WSQ-9", "Inventory")], "total": 1})]
+    answer, _ = answer_jira_question("tell me deversh jani jira of the last month")
+    assert answer.startswith("Matched Jira user: **Devarsh Jani**")
+    assert '(reporter = "nxa222" OR assignee = "nxa222") AND created >= -30d' in session.get.call_args.kwargs["params"]["jql"]
+    session.get.side_effect = [response(200, {"issues": [], "total": 0})]
+    answer, _ = answer_jira_question("show all jira created last week")
+    assert answer.startswith("_No person filter")
