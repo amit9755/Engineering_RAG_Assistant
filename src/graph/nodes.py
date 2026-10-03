@@ -489,6 +489,25 @@ REVIEW_INTENT = re.compile(
 _DEICTIC = re.compile(r"\b(?:here|this (?:file|code|one)|that (?:file|code)|it)\b", re.I)
 
 
+_BACK_REFERENCE = re.compile(
+    r"\b(?:this|that|it|here|above|same|these|those|again)\b|\beach (?:code )?block\b|"
+    r"\bblock by block\b|\bline by line\b|\bmore detail|\bin detail\b|\bfurther\b", re.I)
+
+
+def is_follow_up(question: str) -> bool:
+    """
+    Does the question point back at what was just discussed ("explain each block", "what
+    would you change here", "more detail")? Not when it names a new subject: a code name,
+    the whole project, or the architecture - those are fresh questions.
+    """
+    from src.retrieval.hybrid_retriever import code_names, is_overview_question
+    q = question or ""
+    if not _BACK_REFERENCE.search(q) or code_names(q) or is_overview_question(q) or ARCH_INTENT.search(q):
+        return False
+    return bool(FILE_EXPLAIN_INTENT.search(q) or REVIEW_INTENT.search(q) or CODE_INTENT.search(q)
+                or len(q.split()) <= 8)
+
+
 def is_review_request(question: str) -> bool:
     return bool(REVIEW_INTENT.search(question or ""))
 
@@ -500,12 +519,9 @@ def file_for_question(question: str, history: List[Dict], source_filter=None) ->
     few messages.
     """
     found = find_file_reference(question, source_filter)
-    q = question or ""
-    follow_up = (FILE_EXPLAIN_INTENT.search(q) or REVIEW_INTENT.search(q)
-                 or (_DEICTIC.search(q) and len(q.split()) <= 14))
-    if found or not follow_up:
+    if found or not is_follow_up(question):
         return found
-    for message in reversed([m for m in history[:-1] if m.get("role") == "user"][-3:]):
+    for message in reversed([m for m in history[:-1] if m.get("role") == "user"][-2:]):
         found = find_file_reference(message.get("content", ""), source_filter)
         if found:
             return found
@@ -732,7 +748,7 @@ def retrieval_node(state: RAGState) -> Dict[str, Any]:
     true_chunks, noisy_chunks = hybrid_retriever.retrieve(
         query, source_filter=state.get("source_filter")
     )
-    if not true_chunks:
+    if not true_chunks and is_follow_up(state.get("original_query", "")):
         # A follow-up often only makes sense together with the previous question.
         history = state.get("conversation_history", [])
         previous = next((m["content"] for m in reversed(history[:-1]) if m.get("role") == "user"), "")

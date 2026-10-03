@@ -179,3 +179,30 @@ def test_review_and_architecture_stream_to_code_model(repo, monkeypatch):
     assert "at most 5 improvements" in prompts[0] and "ACTIVE IN USE IN OFFLINE MODE" in prompts[0]
     assert "Drawing the architecture" in arch
     assert "Repository WSQ/app (5 files)" in prompts[1] and "flowchart LR" in prompts[1]
+
+
+@pytest.mark.parametrize("question,expected", [
+    ("explain each code block", True), ("tell me whts you want changes here", True), ("more detail please", True),
+    ("review it", True), ("explain the reservation flow", False), ("explain this project", False),
+    ("can you draw arch of this project", False), ("explain fetchDeviceDetails", False),
+    ("how does login work", False), ("what does this repository do?", False),
+])
+def test_follow_up_detection(question, expected):
+    from src.graph.nodes import is_follow_up
+    assert is_follow_up(question) is expected
+
+
+def test_new_question_does_not_reuse_the_previous_file(repo):
+    history = [{"role": "user", "content": "FE/src/constants/constants.ts explain this file"},
+               {"role": "assistant", "content": "..."}]
+    assert file_for_question("explain the reservation flow", history) is None
+    assert file_for_question("explain this project", history) is None
+    assert file_for_question("explain each code block", history)[2] == "FE/src/constants/constants.ts"
+
+
+def test_health_check_is_instant_and_does_not_touch_the_index(monkeypatch):
+    from src.api.main import app
+    from src.retrieval.vector_store import VectorStore
+    monkeypatch.setattr(VectorStore, "get_document_count", lambda self: (_ for _ in ()).throw(AssertionError()))
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health/ready").json()["status"] == "healthy"

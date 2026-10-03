@@ -282,7 +282,8 @@ class LLMGateway:
         drops the start of the prompt - the instructions and context.
         """
         if model_name.startswith("ollama"):
-            return {"num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "16384"))}
+            # 8192 tokens fits whole-file explanations; larger windows cost memory and CPU time.
+            return {"num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "8192"))}
         return {}
 
     def get_usage_stats(self) -> Dict[str, Any]:

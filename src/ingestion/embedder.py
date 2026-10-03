@@ -60,11 +60,11 @@ class EmbeddingModel:
                 from langchain_huggingface import HuggingFaceEmbeddings
             except ImportError:
                 from langchain_community.embeddings import HuggingFaceEmbeddings
-            # Embedding is CPU-bound during indexing: use all cores but one (PyTorch
-            # often defaults to fewer), leaving one free so the app stays responsive.
+            # Embedding and re-ranking run on the CPU next to Ollama. Half of the cores keeps
+            # indexing fast without starving the model (all cores made both slower).
             try:
                 import torch
-                threads = int(os.environ.get("EMBEDDING_THREADS", "0")) or max(1, (os.cpu_count() or 2) - 1)
+                threads = int(os.environ.get("EMBEDDING_THREADS", "0")) or max(1, (os.cpu_count() or 2) // 2)
                 torch.set_num_threads(threads)
                 logger.info("embedding_threads", threads=threads)
             except Exception as exc:

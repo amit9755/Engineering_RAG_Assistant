@@ -167,19 +167,29 @@ async function submitChangePassword(event) {
 //   We call the /health/ready endpoint every 30s to show a
 //   green/red indicator so users know if the server is running.
 // ============================================================
+let healthFailures = 0;
+
+// A slow reply while the models run on the CPU means "busy", not "offline":
+// offline is shown only when the server cannot be reached, or several checks time out while idle.
 async function checkServerHealth() {
   const dot = document.getElementById('statusDot');
   const text = document.getElementById('statusText');
   try {
-    dot.className = 'status-dot loading';
-    text.textContent = 'Connecting...';
-    const res = await fetch(`${API_BASE}/health/ready`, { signal: AbortSignal.timeout(5000) });
+    const res = await realFetch(`${API_BASE}/health/ready`, { signal: AbortSignal.timeout(15000) });
     const data = await res.json();
+    healthFailures = 0;
     dot.className = 'status-dot online';
     text.textContent = `Server ready (${data.environment})`;
-  } catch {
-    dot.className = 'status-dot error';
-    text.textContent = 'Server offline - start with: python -m uvicorn src.api.main:app';
+  } catch (err) {
+    healthFailures++;
+    const timedOut = err && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    if (timedOut && (state.isLoading || healthFailures < 3)) {
+      dot.className = 'status-dot loading';
+      text.textContent = state.isLoading ? 'Server busy (answering)...' : 'Server busy...';
+    } else {
+      dot.className = 'status-dot error';
+      text.textContent = 'Server offline - start it with start.ps1 (or python -m uvicorn src.api.main:app)';
+    }
   }
 }
 

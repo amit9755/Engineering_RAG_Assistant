@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+import time
 import uuid
 import json
 
@@ -268,8 +269,11 @@ async def query_endpoint(
     try:
         from src.graph.pipeline import rag_pipeline
 
-        # Run the LangGraph pipeline
-        result = rag_pipeline.run(
+        # Run the LangGraph pipeline in a worker thread: it takes seconds to minutes on a CPU
+        # and must not freeze the server (health checks, other users) meanwhile.
+        from starlette.concurrency import run_in_threadpool
+        result = await run_in_threadpool(
+            rag_pipeline.run,
             query=request.question,
             session_id=session_id,
             user_id=x_user_id,
@@ -334,8 +338,10 @@ async def query_stream_endpoint(
             from src.graph.pipeline import rag_pipeline
             from src.guardrails.input_guardrails import input_guardrails
 
-            # Run guardrails first
-            guard_result = input_guardrails.validate(request.question)
+            # Run guardrails first (in a worker thread: PII detection can take a while)
+            from starlette.concurrency import run_in_threadpool
+            started = time.time()
+            guard_result = await run_in_threadpool(input_guardrails.validate, request.question)
             if not guard_result.is_safe:
                 error_event = json.dumps({"error": "Request blocked by guardrails", "done": True})
                 yield f"data: {error_event}\n\n"
@@ -406,12 +412,15 @@ async def query_stream_endpoint(
                 yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': arch_sources, 'true_data_count': len(arch_sources), 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
                 return
 
+            searched = time.time()
             true_chunks, noisy_chunks = await run_in_threadpool(
                 hybrid_retriever.retrieve,
                 guard_result.sanitized_text,
                 source_filter=request.source_filter(),
             )
-            if not true_chunks:
+            searched = time.time() - searched
+            from src.graph.nodes import is_follow_up
+            if not true_chunks and is_follow_up(request.question):
                 # A follow-up ("and the other one?") often only makes sense with the previous question.
                 previous = next((m["content"] for m in reversed(history[:-1]) if m["role"] == "user"), "")
                 if previous:
@@ -461,6 +470,10 @@ async def query_stream_endpoint(
                                                        stop=llm_gateway.ANSWER_STOP):
                     event = json.dumps({"token": token, "done": False})
                     yield f"data: {event}\n\n"
+
+            # Where the time went (search vs. model), to diagnose slow answers.
+            logger.info("answer_timing", search_s=round(searched, 1), total_s=round(time.time() - started, 1),
+                        chunks=len(true_chunks), question_words=len(request.question.split()))
 
             # Send metadata after streaming completes
             sources = list(dict.fromkeys(

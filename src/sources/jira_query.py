@@ -27,8 +27,18 @@ _FILTER_CUES = re.compile(
     r"fixed|completed|done|open|unresolved|pending|last|past|previous|this|today|yesterday|recent|latest|"
     r"how many|count|number of|list|all|show)\b", re.I)
 _ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9_]+-\d+\b")
+# "my", "by me", "assigned to me", "I created" - but not "tell me" / "give me" / "show me".
 _ME = re.compile(r"\b(by me|my|mine|to me|for me|myself|i (?:have |had )?(?:created|reported|raised|opened|"
-                 r"resolved|closed|fixed|worked|filed|logged))\b|\bme\b", re.I)
+                 r"resolved|closed|fixed|worked|filed|logged))\b", re.I)
+# A name right after the issue word ("jira Deversh jani", "tickets of Naresh") or possessive ("Naresh's bugs").
+_NAMED = re.compile(r"\b(?:jiras?|issues?|tickets?|bugs?|tasks?|stor(?:y|ies)|defects?)\s+(?:of|for|from|by|"
+                    r"assigned to|created by|reported by|raised by)?\s*([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,2})", re.I)
+_POSSESSIVE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'s\s+(?:jiras?|issues?|tickets?|bugs?|tasks?)", re.I)
+_COMMON = {"open", "opened", "closed", "created", "create", "resolved", "fixed", "done", "pending", "last", "past",
+           "this", "that", "these", "all", "any", "in", "on", "the", "from", "which", "with", "about", "and", "or",
+           "assigned", "reported", "raised", "status", "list", "show", "give", "tell", "me", "my", "is", "are",
+           "were", "was", "today", "yesterday", "week", "month", "year", "recent", "latest", "count", "how", "many",
+           "high", "low", "priority", "unresolved", "still", "not", "to", "of", "for", "by", "jira", "issues"}
 _PERSON = re.compile(r"\b(?:by|to|for)\s+([A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*){0,2}?)"
                      r"(?=\s+(?:in|on|during|from|since|last|past|this|which|that|and|with|about|for)\b|[?.!,]|$)", re.I)
 _NOT_A_NAME = {"me", "my", "mine", "myself", "status", "date", "priority", "type", "project", "jira", "issue",
@@ -55,7 +65,9 @@ class JiraQuery:
 def parse_jira_question(question: str) -> Optional[JiraQuery]:
     """A JiraQuery for filter-style Jira questions, else None (left to normal search)."""
     q = " ".join((question or "").split())
-    if not _JIRA_WORDS.search(q) or not _FILTER_CUES.search(q) or _ISSUE_KEY.search(q):
+    if not _JIRA_WORDS.search(q) or _ISSUE_KEY.search(q):
+        return None
+    if not (_FILTER_CUES.search(q) or _POSSESSIVE.search(q) or _NAMED.search(q)):
         return None
     lower = q.lower()
     query = JiraQuery()
@@ -63,10 +75,16 @@ def parse_jira_question(question: str) -> Optional[JiraQuery]:
     if _ME.search(q):
         query.person = "me"
     else:
-        for match in _PERSON.finditer(q):
-            name = match.group(1).strip()
-            if name.split()[0].lower() not in _NOT_A_NAME:
-                query.person = name
+        candidates = [m.group(1) for m in _PERSON.finditer(q)] + [m.group(1) for m in _POSSESSIVE.finditer(q)] + \
+                     [m.group(1) for m in _NAMED.finditer(q)]
+        for raw in candidates:
+            words = []
+            for word in raw.split():
+                if word.lower() in _COMMON or word.lower() in _NOT_A_NAME:
+                    break          # a name ends where ordinary words start ("Naresh in last month")
+                words.append(word)
+            if words and len(" ".join(words)) >= 3:
+                query.person = " ".join(words)
                 break
 
     if re.search(r"\b(resolv\w*|closed|close|fixed|fix|completed|done)\b", lower) and query.person:
@@ -192,14 +210,23 @@ def _resolve_user(client, name: str) -> Optional[str]:
     cloud = client.api.cloud
     path, params = ("/rest/api/3/user/search", {"query": name}) if cloud else \
         ("/rest/api/2/user/search", {"username": name, "maxResults": 5})
-    response = client._get(path, params)
-    if response.status_code != 200:
+    tokens = [t.lower() for t in name.split()]
+    users = []
+    # Full name first; many servers only prefix-match one word, so fall back to the first name.
+    for term in dict.fromkeys([name, name.split()[0]]):
+        params = {"query": term} if cloud else {"username": term, "maxResults": 20}
+        response = client._get(path, params)
+        if response.status_code == 200:
+            users = client.api.json(response, "user search") or []
+        if users:
+            break
+    def label(u):
+        return f"{u.get('displayName') or ''} {u.get('name') or ''} {u.get('emailAddress') or ''}".lower()
+    matching = [u for u in users if all(t in label(u) for t in tokens)]
+    if not matching:
         return None
-    users = client.api.json(response, "user search") or []
-    if not users:
-        return None
-    exact = [u for u in users if (u.get("displayName") or "").lower() == name.lower()]
-    user = (exact or users)[0]
+    exact = [u for u in matching if (u.get("displayName") or "").lower() == name.lower()]
+    user = (exact or matching)[0]
     return _quote(user.get("accountId") or user.get("name") or user.get("key"))
 
 

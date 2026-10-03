@@ -47,16 +47,10 @@ async def readiness():
     """
     from src.config import settings
 
-    # Check vector store connectivity
-    vector_store_ok = False
-    try:
-        from src.retrieval.vector_store import vector_store
-        count = vector_store.get_document_count()
-        vector_store_ok = True
-    except Exception:
-        pass
-
-    status = "healthy" if vector_store_ok else "degraded"
+    # Kept instant on purpose: the UI polls this while answers are being generated, and a
+    # slow check (e.g. counting vectors while the CPU is busy) made the app look offline.
+    # Detailed component checks live in /health/stats.
+    status = "healthy"
 
     return HealthStatus(
         status=status,

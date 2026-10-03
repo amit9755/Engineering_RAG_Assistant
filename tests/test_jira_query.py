@@ -89,3 +89,30 @@ def test_live_answer_reports_unknown_user_and_bad_jql(registry, monkeypatch):  #
     session.get.return_value = response(400, {"errorMessages": ["Field 'resolved' does not exist"]})
     answer, _ = answer_jira_question("my resolved jira")
     assert "Jira rejected the query: Field 'resolved' does not exist" in answer
+
+
+@pytest.mark.parametrize("question,person,role", [
+    ("tell me jira Deversh jani", "Deversh jani", "any"),          # "tell me" is not "my"
+    ("give me open jira of Naresh Mandloi", "Naresh Mandloi", "any"),
+    ("Deversh's bugs", "Deversh", "any"),
+    ("show me my open jira", "me", "any"),
+    ("give me last month all jira which is create by me", "me", "reporter"),
+    ("open bugs assigned to Naresh Mandloi in last month", "Naresh Mandloi", "assignee"),
+])
+def test_person_detection(question, person, role):
+    query = parse_jira_question(question)
+    assert (query.person, query.role) == (person, role)
+
+
+def test_user_lookup_falls_back_to_first_name_and_matches_all_words():
+    from unittest.mock import Mock
+    from src.sources.jira_query import _resolve_user
+    client = Mock()
+    client.api.cloud = False
+    client.api.json = lambda r, what: r.json()
+    users = [{"name": "nxa111", "displayName": "Deversh Patel"}, {"name": "nxa222", "displayName": "Deversh Jani"}]
+    client._get.side_effect = [response(200, []), response(200, users)]   # full name: none; first name: two
+    assert _resolve_user(client, "Deversh jani") == '"nxa222"'
+    assert client._get.call_args_list[1].args[1]["username"] == "Deversh"
+    client._get.side_effect = [response(200, users)]
+    assert _resolve_user(client, "Nobody Else") is None
