@@ -1,0 +1,102 @@
+"""Explain a named file block by block, follow-ups, and screenshot search refinements (offline)."""
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+from langchain_core.documents import Document
+
+from src.graph.image_flow import extract_search_terms, find_code_matches, format_locate_answer, is_weak_term
+from src.graph.nodes import file_for_question, find_file_reference, is_file_explain_request, whole_file
+from tests.test_connectors import vectors  # noqa: F401
+
+
+def chunk(path, text, i, source="bb-1"):
+    return Document(page_content=f"Repository: WSQ/app (branch main)\nFile: {path}\n\n{text}", metadata={
+        "source_id": source, "source_type": "bitbucket", "file_path": path, "chunk_index": i,
+        "source_file": f"WSQ/app/{path}", "url": f"https://bb.example.com/{path}", "chunk_id": f"{source}:{path}:{i}"})
+
+
+@pytest.fixture
+def repo(vectors, monkeypatch):  # noqa: F811
+    import src.retrieval.vector_store as vector_module
+    docs = [
+        chunk("FE/src/constants/constants.ts", "export const API = '/api';\nexport const STATUS = {", 0),
+        chunk("FE/src/constants/constants.ts", "export const STATUS = {\n  3: 'ACTIVE IN USE IN OFFLINE MODE',\n};", 1),
+        chunk("FE/src/app/testbed/testbed-list.component.html",
+              "<h2>Monitor and manage your test bed infrastructure</h2>\n<span>Overall Health</span>\n"
+              "<div>Total Testbeds</div><small>Last checked: {{ last || 'Never' }}</small>", 0),
+        chunk("BE/routes/a/route.ts", "export default a", 0),
+        chunk("BE/routes/b/route.ts", "export default b", 0),
+        chunk("BE/services/scheduler.js", "// Never blocks", 0),
+    ]
+    vectors._store.add_documents(docs, ids=[d.metadata["chunk_id"] for d in docs])
+    monkeypatch.setattr(vector_module, "vector_store", vectors)
+    return vectors
+
+
+def test_file_named_by_path_or_unique_name(repo):
+    assert find_file_reference("FE/src/constants/constants.ts - can you explain this file code")[2] == \
+        "FE/src/constants/constants.ts"
+    assert find_file_reference("explain constants.ts please")[2] == "FE/src/constants/constants.ts"
+    assert find_file_reference("explain route.ts") is None            # two files share that name
+    assert find_file_reference("explain b/route.ts")[2] == "BE/routes/b/route.ts"
+
+
+def test_follow_up_uses_the_file_from_the_previous_message(repo):
+    history = [{"role": "user", "content": "FE/src/constants/constants.ts - can you explain this file code"},
+               {"role": "assistant", "content": "It holds constants."},
+               {"role": "user", "content": "each code block i mean explain"}]
+    assert file_for_question("each code block i mean explain", history)[2] == "FE/src/constants/constants.ts"
+    assert file_for_question("how does login work", history) is None    # not a follow-up about the file
+    assert is_file_explain_request("each code block i mean explain")
+    assert not is_file_explain_request("write a unit test for constants.ts")   # that's code mode
+
+
+def test_whole_file_is_reassembled_without_overlap(repo):
+    text, truncated = whole_file("bb-1", "FE/src/constants/constants.ts")
+    assert text == "export const API = '/api';\nexport const STATUS = {\n  3: 'ACTIVE IN USE IN OFFLINE MODE',\n};"
+    assert not truncated and "Repository:" not in text
+
+
+def test_explain_file_streams_whole_file_to_code_model(repo, monkeypatch):
+    from src.api.main import app
+    from src.gateway.llm_gateway import llm_gateway
+    calls = {}
+
+    async def stream(messages, temperature=0.1, max_tokens=1024, model=None):
+        calls.update(messages=messages, model=model)
+        yield "### `export const API`\nThe API base path."
+    monkeypatch.setattr(llm_gateway, "astream", stream)
+    monkeypatch.setattr("dotenv.dotenv_values", lambda *a, **k: {})
+    monkeypatch.delenv("OLLAMA_CODE_MODEL", raising=False)
+    history = [{"role": "user", "content": "FE/src/constants/constants.ts - can you explain this file code"},
+               {"role": "assistant", "content": "It holds constants."},
+               {"role": "user", "content": "each code block i mean explain"}]
+    with TestClient(app) as client:
+        text = client.post("/api/v1/query/stream", json={"question": "each code block i mean explain",
+                                                         "conversation_history": history}).text
+    events = [json.loads(l[6:]) for l in text.splitlines() if l.startswith("data: ")]
+    assert calls["model"] == "ollama/qwen2.5-coder:7b"
+    assert "ACTIVE IN USE IN OFFLINE MODE" in calls["messages"][0]["content"]     # the whole file is in the prompt
+    assert "block by block" in calls["messages"][0]["content"]
+    assert events[0]["status"].startswith("Explaining FE/src/constants/constants.ts")
+    assert events[-1]["sources"] == ["WSQ/app/FE/src/constants/constants.ts"]
+
+
+def test_screenshot_search_handles_casing_misreads_and_noise(repo):
+    transcription = """TestBed
+Monitor and manage your tested bed infrastructure
+OVERALL HEALTH
+TOTAL TESTBEDS
+Last checked: Never"""
+    terms = extract_search_terms(transcription)
+    assert "Monitor and manage" in terms and is_weak_term("Never") and not is_weak_term("OVERALL HEALTH")
+    matches = find_code_matches(terms, None)
+    files = [m["file"].split("/", 2)[-1] for m in matches]
+    assert files[0] == "FE/src/app/testbed/testbed-list.component.html"   # found despite UPPERCASE + misread
+    assert "BE/services/scheduler.js" not in files                          # matched only "Never": dropped
+    page = matches[0]
+    assert {"OVERALL HEALTH", "TOTAL TESTBEDS", "Monitor and manage"} <= set(page["terms"])
+    answer = format_locate_answer(matches, ["WSQ/app/BE/routes/a/route.ts"], transcription)
+    assert "**Related by meaning**" in answer and "`BE/routes/a/route.ts`" in answer

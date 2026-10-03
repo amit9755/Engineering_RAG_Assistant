@@ -110,11 +110,32 @@ def extract_search_terms(text: str, limit: int = 14) -> List[str]:
         if not line or line.lower().startswith("image shows"):
             continue
         words = line.split()
-        if 2 <= len(words) <= 8 and re.search(r"[A-Za-z]{3}", line):
-            add(line)                                # labels, titles, short messages
+        if 2 <= len(words) <= 12 and re.search(r"[A-Za-z]{3}", line):
+            if len(words) <= 8:
+                add(line)                            # labels, titles, short messages
             if ":" in line:
+                add(line.split(":", 1)[0])           # "Last checked: Never" -> "Last checked"
                 add(line.split(":", 1)[1])           # "Error 190: Invalid OAuth token" -> message part
+            if len(words) >= 5:
+                # One misread word (OCR) must not sink the whole line: also try its start and end.
+                add(" ".join(words[:3]))
+                add(" ".join(words[-3:]))
     return terms[:limit]
+
+
+def is_weak_term(term: str) -> bool:
+    """A single ordinary word ("Never", "Status"): matches everywhere, so it cannot locate code alone."""
+    return " " not in term and not (_IDENTIFIER.fullmatch(term) or _PATH.fullmatch(term)
+                                     or re.search(r"\d|[._/-]", term))
+
+
+def _variants(term: str) -> List[str]:
+    """UI text is often styled (CSS uppercase / capitalize): try the casings code usually uses."""
+    out = []
+    for v in (term, term.lower(), term.title(), term.capitalize()):
+        if v not in out:
+            out.append(v)
+    return out
 
 
 _HEADER = re.compile(r"^(Repository|File|Confluence page|Path|Last updated|Jira issue):", re.I)
@@ -139,9 +160,11 @@ def find_code_matches(terms: List[str], source_filter=None, limit: int = 10) -> 
     from src.retrieval.vector_store import vector_store
     files: Dict[str, Dict] = {}
     for term in terms:
-        hits = vector_store.find_text(term, source_filter)
-        if not hits and term != term.lower():
-            hits = vector_store.find_text(term.lower(), source_filter)
+        hits = []
+        for variant in _variants(term):
+            hits = vector_store.find_text(variant, source_filter)
+            if hits:
+                break
         for doc in hits:
             meta = doc.metadata
             key = meta.get("source_file") or meta.get("file_path") or "unknown"
@@ -155,6 +178,10 @@ def find_code_matches(terms: List[str], source_filter=None, limit: int = 10) -> 
                 entry["texts"].append(doc.page_content)
     for entry in files.values():
         entry["line"] = _best_line(entry.pop("texts"), entry["terms"])
+    # Files that matched only single ordinary words ("Never") are noise once anything
+    # matched a distinctive term (a label, message or identifier).
+    if any(not is_weak_term(t) for e in files.values() for t in e["terms"]):
+        files = {k: e for k, e in files.items() if any(not is_weak_term(t) for t in e["terms"])}
     def rank(entry):
         path = entry["file"].lower()
         is_test = any(t in path for t in ("/test", "test/", ".test.", ".spec.", "__tests__"))
@@ -171,6 +198,8 @@ def _short(path: str) -> str:
 
 def format_locate_answer(matches: List[Dict], retrieved: List[str], transcription: str) -> str:
     seen = "\n".join(f"- {l.strip(' -*•')}" for l in transcription.splitlines() if l.strip())[:1500]
+    matched = {m["file"] for m in matches}
+    related = [f for f in retrieved if f not in matched and not f.endswith(("(commit history)", "(file tree)"))][:6]
     if matches:
         rows = "\n".join(
             f"| {i} | {'[' + _short(m['file']) + '](' + m['url'] + ')' if m['url'].startswith('http') else '`' + _short(m['file']) + '`'} "
@@ -179,12 +208,14 @@ def format_locate_answer(matches: List[Dict], retrieved: List[str], transcriptio
         head = (f"### Where this appears in the code\n\nFound text from the image in **{len(matches)} file"
                 f"{'s' if len(matches) != 1 else ''}** (most matches first):\n\n"
                 "| # | File | Matched text | Line |\n|---|---|---|---|\n" + rows)
+        if related:
+            head += "\n\n**Related by meaning** (no exact text match):\n" + "\n".join(f"- `{_short(f)}`" for f in related)
     else:
         head = ("### Where this appears in the code\n\nNone of the text in the image appears word-for-word in "
                 "the selected sources.")
-        if retrieved:
+        if related:
             head += " The closest related files by meaning are:\n\n" + "\n".join(
-                f"- `{_short(f)}`" for f in retrieved[:6])
+                f"- `{_short(f)}`" for f in related)
     return head + f"\n\n**Text read from the image:**\n{seen}"
 
 

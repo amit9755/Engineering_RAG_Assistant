@@ -13,7 +13,7 @@
 
 import re
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 from src.graph.state import RAGState
 from src.observability.logger import get_logger
@@ -439,6 +439,89 @@ CODE_MODEL_HINT = ("\n\n_Written with the general model because the code model i
                    "code run `ollama pull qwen2.5-coder:7b` (or set OLLAMA_CODE_MODEL)._")
 
 
+FILE_EXPLAIN_PROMPT = """You are a senior engineer explaining a file from the user's repository.
+The user can already see the code, so NEVER copy code blocks back: do not use ``` fences, and quote
+at most one signature line per block in a single `code span`.
+Explain it block by block, in the order the code appears:
+- For each block (imports, constants, types, each function / class / component, config sections),
+  start with a short heading naming it, give its signature in a code span, then explain in 2-5
+  sentences or bullets what it does, its inputs and outputs, and how it connects to the rest.
+- Point out anything important: side effects, error handling, API endpoints, magic values, TODOs.
+- End with a 2-3 line summary of the file's role in the project.
+- Explain only what is in the file; do not invent code. If the file was cut short, say so.
+
+File: {path}
+```
+{content}
+```"""
+
+FILE_EXPLAIN_INTENT = re.compile(
+    r"\b(explain|explanation|walk me through|describe|summari[sz]e|review|understand|line by line|"
+    r"each (?:code )?block|block by block|in detail|more detail|what does (?:it|this|the file|this file) do)\b", re.I)
+_FILE_TOKEN = re.compile(r"[\w@.\[\]-]+(?:/[\w@.\[\]-]+)*\.[A-Za-z0-9]{1,6}\b|[\w-]+(?:/[\w@.\[\]-]+)+")
+MAX_FILE_CHARS = 14000
+
+
+def find_file_reference(text: str, source_filter=None) -> Optional[tuple]:
+    """(source_id, source_file, file_path) for a file named in the text: a path or a unique file name."""
+    from src.retrieval.vector_store import vector_store
+    tokens = [t.strip("`'\"()") for t in _FILE_TOKEN.findall(text or "")]
+    if not tokens:
+        return None
+    files = vector_store.list_files(None if source_filter is None else source_filter.source_ids)
+    for token in sorted(tokens, key=len, reverse=True):
+        token_l = token.lower().lstrip("./")
+        exact = [f for f in files if f[2].lower() == token_l or f[1].lower() == token_l]
+        if exact:
+            return exact[0]
+        suffix = [f for f in files if f[2].lower().endswith("/" + token_l)]
+        if len(suffix) == 1 or (suffix and "/" in token_l):
+            return sorted(suffix, key=lambda f: len(f[2]))[0]
+    return None
+
+
+def file_for_question(question: str, history: List[Dict], source_filter=None) -> Optional[tuple]:
+    """
+    The file a question is about: named in it, or - for a follow-up such as "explain each
+    block" - named in one of the user's last few messages.
+    """
+    found = find_file_reference(question, source_filter)
+    if found or not FILE_EXPLAIN_INTENT.search(question or ""):
+        return found
+    for message in reversed([m for m in history[:-1] if m.get("role") == "user"][-3:]):
+        found = find_file_reference(message.get("content", ""), source_filter)
+        if found:
+            return found
+    return None
+
+
+def whole_file(source_id: str, file_path: str) -> Tuple[str, bool]:
+    """The file's text reassembled from its chunks (header and chunk overlaps removed); (text, truncated)."""
+    from src.retrieval.vector_store import vector_store
+    chunks = vector_store.get_file_chunks(source_id, file_path, 0, limit=10_000)
+    text = ""
+    for doc in chunks:
+        body = doc.page_content.split("\n\n", 1)[1] if doc.page_content.startswith("Repository:") else doc.page_content
+        # Chunks overlap by up to ~100 characters: skip the part already added.
+        overlap = next((n for n in range(min(len(text), len(body), 150), 0, -1) if text.endswith(body[:n])), 0)
+        text += body[overlap:] if text else body
+    return text[:MAX_FILE_CHARS], len(text) > MAX_FILE_CHARS
+
+
+def is_file_explain_request(question: str) -> bool:
+    return bool(FILE_EXPLAIN_INTENT.search(question or "")) and not is_code_request(question)
+
+
+def build_file_explain_messages(file_path: str, content: str, truncated: bool, question: str,
+                                history: List[Dict]) -> List[Dict]:
+    note = "\n(... file continues; only the first part is shown ...)" if truncated else ""
+    messages = [{"role": "system", "content": FILE_EXPLAIN_PROMPT.format(path=file_path, content=content + note)}]
+    prior = history[:-1] if history and history[-1].get("content") == question else history
+    messages += [{"role": m["role"], "content": m["content"]} for m in prior[-2:]]
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
 def is_code_request(question: str) -> bool:
     return bool(CODE_INTENT.search(question or ""))
 
@@ -523,6 +606,13 @@ def retrieval_node(state: RAGState) -> Dict[str, Any]:
     true_chunks, noisy_chunks = hybrid_retriever.retrieve(
         query, source_filter=state.get("source_filter")
     )
+    if not true_chunks:
+        # A follow-up often only makes sense together with the previous question.
+        history = state.get("conversation_history", [])
+        previous = next((m["content"] for m in reversed(history[:-1]) if m.get("role") == "user"), "")
+        if previous:
+            true_chunks, noisy_chunks = hybrid_retriever.retrieve(
+                f"{previous} {query}", source_filter=state.get("source_filter"))
 
     # Serialize chunks to dicts for state storage
     true_data_dicts = [
@@ -642,6 +732,24 @@ def generation_node(state: RAGState) -> Dict[str, Any]:
     if jira:
         steps.append("generation")
         return {"llm_response": jira[0], "model_used": "none (live Jira search)", "pipeline_steps": steps}
+
+    question = state.get("original_query", "")
+    file_ref = file_for_question(question, state.get("conversation_history", []), state.get("source_filter"))
+    if file_ref and is_file_explain_request(question):
+        from src.gateway.llm_gateway import llm_gateway as gateway
+        content, truncated = whole_file(file_ref[0], file_ref[2])
+        messages = build_file_explain_messages(file_ref[2], content, truncated, question,
+                                               state.get("conversation_history", []))
+        try:
+            model = gateway.code_model_string()
+            response = gateway.complete(messages, temperature=0.2, max_tokens=2500, model=model)
+        except Exception as exc:
+            logger.warning("code_model_unavailable_using_default", error=str(exc)[:200])
+            model = gateway._build_model_string()
+            response = gateway.complete(messages, temperature=0.2, max_tokens=2500) + CODE_MODEL_HINT
+        steps.append("generation")
+        return {"llm_response": response, "model_used": model, "pipeline_steps": steps,
+                "source_documents": [file_ref[1]]}
 
     if is_code_request(state.get("original_query", "")):
         from src.gateway.llm_gateway import llm_gateway as gateway

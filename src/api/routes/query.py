@@ -164,6 +164,29 @@ async def image_answer_events(request: "QueryRequest", history: list):
     yield {"sources": sources, "model": f"{vision_model} (read) + {llm_gateway._build_model_string()}"}
 
 
+async def stream_code_model(messages, status: str, max_tokens: int = 2000):
+    """
+    SSE events from the code model, falling back to the general model (plus an install
+    hint) when the code model is not installed. Used for code suggestions and file explanations.
+    """
+    from src.gateway.llm_gateway import llm_gateway
+    from src.graph.nodes import CODE_MODEL_HINT
+    code_model = llm_gateway.code_model_string()
+    yield f"data: {json.dumps({'status': status.format(model=code_model.split('/', 1)[1]), 'done': False})}\n\n"
+    started = False
+    try:
+        async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=max_tokens, model=code_model):
+            started = True
+            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+    except Exception as exc:
+        if started:
+            raise
+        logger.warning("code_model_unavailable_using_default", error=str(exc)[:200])
+        async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=max_tokens):
+            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+        yield f"data: {json.dumps({'token': CODE_MODEL_HINT, 'done': False})}\n\n"
+
+
 def _vision_error(exc: Exception) -> str:
     text = str(exc)
     if "not found" in text.lower() and ("model" in text.lower() or "pull" in text.lower()):
@@ -327,11 +350,30 @@ async def query_stream_endpoint(
                 yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': keys, 'true_data_count': 0, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
                 return
 
+            # "explain <file>" (or a follow-up like "explain each block"): the whole file, block by block.
+            from src.graph.nodes import (build_file_explain_messages, file_for_question,
+                                         is_file_explain_request, whole_file)
+            file_ref = await run_in_threadpool(file_for_question, request.question, history, request.source_filter())
+            if file_ref and is_file_explain_request(request.question):
+                content, truncated = await run_in_threadpool(whole_file, file_ref[0], file_ref[2])
+                messages = build_file_explain_messages(file_ref[2], content, truncated, request.question, history)
+                async for event in stream_code_model(messages, f"Explaining {file_ref[2]} with {{model}}...", 2500):
+                    yield event
+                yield f"data: {json.dumps({'done': True, 'type': 'metadata', 'sources': [file_ref[1]], 'true_data_count': 1, 'noisy_data_count': 0, 'session_id': session_id})}\n\n"
+                return
+
             true_chunks, noisy_chunks = await run_in_threadpool(
                 hybrid_retriever.retrieve,
                 guard_result.sanitized_text,
                 source_filter=request.source_filter(),
             )
+            if not true_chunks:
+                # A follow-up ("and the other one?") often only makes sense with the previous question.
+                previous = next((m["content"] for m in reversed(history[:-1]) if m["role"] == "user"), "")
+                if previous:
+                    true_chunks, noisy_chunks = await run_in_threadpool(
+                        hybrid_retriever.retrieve, f"{previous} {guard_result.sanitized_text}",
+                        source_filter=request.source_filter())
 
             source_filter = request.source_filter()
             catalog = await run_in_threadpool(knowledge_catalog, source_filter)
@@ -349,25 +391,16 @@ async def query_stream_endpoint(
             direct = commit_list_answer(request.question, chunk_dicts)
 
             if is_code_request(request.question) and not direct:
-                # Code suggestion mode: code model + expanded file context; falls back to the
-                # general model (with an install hint) if the code model is not installed.
+                # Code suggestion mode: code model + expanded file context; a file named in the
+                # question (or just discussed) is included whole.
+                if file_ref:
+                    content, _ = await run_in_threadpool(whole_file, file_ref[0], file_ref[2])
+                    chunk_dicts.insert(0, {"content": f"File: {file_ref[2]}\n\n{content}", "source": file_ref[1],
+                                           "source_type": "bitbucket", "score": 1.0, "metadata": {}})
                 messages = await run_in_threadpool(build_code_messages, request.question, chunk_dicts, catalog,
                                                    history)
-                code_model = llm_gateway.code_model_string()
-                yield f"data: {json.dumps({'status': 'Writing code with ' + code_model.split('/', 1)[1] + '...', 'done': False})}\n\n"
-                started = False
-                try:
-                    async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=2000,
-                                                           model=code_model):
-                        started = True
-                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                except Exception as exc:
-                    if started:
-                        raise
-                    logger.warning("code_model_unavailable_using_default", error=str(exc)[:200])
-                    async for token in llm_gateway.astream(messages, temperature=0.2, max_tokens=2000):
-                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                    yield f"data: {json.dumps({'token': CODE_MODEL_HINT, 'done': False})}\n\n"
+                async for event in stream_code_model(messages, "Writing code with {model}..."):
+                    yield event
             elif not true_chunks:
                 # Nothing relevant retrieved: answer honestly instead of letting the
                 # model answer from general knowledge with invented citations.

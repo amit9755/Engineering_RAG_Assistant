@@ -267,6 +267,20 @@ class VectorStore:
         all_results = self.similarity_search(query, k=k * 3)
         return [doc for doc in all_results if source_filter.matches(doc.metadata)][:k]
 
+    def list_files(self, source_ids: List[str] = None) -> List[tuple]:
+        """(source_id, source_file, file_path) of every indexed repository file; cached until the index changes."""
+        if settings.vector_store_type != "chroma":
+            return []
+        collection = self._store._collection
+        count = collection.count()
+        if getattr(self, "_files_cache", (None, None))[0] != count:
+            data = collection.get(where={"source_type": "bitbucket"}, include=["metadatas"])
+            files = {(m.get("source_id"), m.get("source_file"), m.get("file_path"))
+                     for m in data["metadatas"] if m and m.get("file_path") and not m["file_path"].startswith("(")}
+            self._files_cache = (count, sorted(files))
+        files = self._files_cache[1]
+        return [f for f in files if source_ids is None or f[0] in source_ids]
+
     def get_file_chunks(self, source_id: str, file_path: str, around: int = 0, limit: int = 8) -> List[Document]:
         """Consecutive chunks of one indexed file around a chunk index, in file order."""
         if settings.vector_store_type != "chroma":
